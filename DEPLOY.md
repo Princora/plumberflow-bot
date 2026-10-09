@@ -1,0 +1,165 @@
+# PlumberFlow — Deployment Guide
+
+FastAPI bot on Fly.io. Data lives in Neon (Postgres). WhatsApp Cloud API talks to customers and
+plumbers; Telegram is where leads reach the founder and where the founder routes them.
+
+```
+main.py              FastAPI app: webhooks, customer flow, plumber commands, sweeps
+services.py          Builds the stores, clients and services from environment variables
+app_store.py         Plumber registry and admin queries on top of the packages
+dispatch/            Telegram buttons, WhatsApp offer, first "take" wins
+verification/        Done / no go, customer checks, invoices, reminders
+migrations/          001 job lifecycle, 002 dispatch, 003 self-pause
+tests/               pytest suite
+WHATSAPP_TEMPLATES.md   Templates to submit to Meta
+```
+
+## How a job moves
+
+1. A homeowner messages the WhatsApp number and answers the lead questions.
+2. The lead is posted to the founder's Telegram with buttons: offer to a plumber, offer to the
+   matching plumbers, pick one, or skip.
+3. The plumber gets a WhatsApp offer (suburb and problem only) and replies `take`. The first
+   reply wins and receives the customer's details.
+4. The plumber sends `done` and the amount, or `no go`. The customer is asked to confirm 2 hours
+   later (buttons), or after 24 hours if the plumber stays silent.
+5. Friday from 17:00 SAST each plumber gets that week's invoice (R220 per charged job). You mark
+   it paid in Telegram. Overdue invoices get a reminder, then a lead pause.
+
+Every 10 minutes an in-process scheduler runs the timers. That is why the app must run on
+**one machine only**.
+
+## One-time setup
+
+### 1. Neon
+
+Migrations are applied with the **direct** connection string (host without `-pooler`):
+
+```bash
+psql "$NEON_DIRECT_URL" -f migrations/001_job_lifecycle.sql
+psql "$NEON_DIRECT_URL" -f migrations/002_dispatch.sql
+psql "$NEON_DIRECT_URL" -f migrations/003_self_pause.sql
+```
+
+001 and 002 are already applied on the PlumberFlow project. 003 lets plumbers use PAUSE and
+RESUME; without it those two commands tell the plumber to try again later.
+
+The bot runs on the **pooled** string (host contains `-pooler`), set as `DATABASE_URL`.
+
+### 2. Load the plumber roster
+
+Plumbers are rows in `plumbers`. Offers are matched on `areas`, so keep it filled in (lowercase
+suburbs). `whatsapp` is digits only, starting with `27`.
+
+```sql
+INSERT INTO plumbers (first_name, whatsapp, areas, services, experience_years, pirb_registered, availability)
+VALUES ('Sipho', '27821234567', ARRAY['randburg','fourways','northcliff'],
+        ARRAY['Burst pipe','Leak'], 8, false, 'Mon–Fri, 8am–5pm');
+```
+
+Plumbers can also register themselves by sending `JOIN` to the WhatsApp number. They become
+active immediately and appear in your "Pick a plumber" list.
+
+### 3. Fly.io
+
+Install `flyctl` and log in:
+
+```powershell
+powershell -Command "iwr https://fly.io/install.ps1 -useb | iex"
+fly auth login
+```
+
+`fly.toml` and the `Dockerfile` sit at the repo root next to `main.py`. If Fly's GitHub
+integration is used, the working directory must be that folder.
+
+### 4. Secrets
+
+```bash
+fly secrets set DATABASE_URL="<pooled-url>" WA_TOKEN="<token>" WA_PHONE_NUMBER_ID="<id>" VERIFY_TOKEN="<random>" TELEGRAM_TOKEN="<token>" FOUNDER_CHAT_ID="<chat-id>" FOUNDER_USER_ID="<user-id>" TELEGRAM_WEBHOOK_SECRET="<random>" ANTHROPIC_API_KEY="<key>" ADMIN_PHONE="<27…>"
+```
+
+| Variable | What it is |
+|---|---|
+| `DATABASE_URL` | Neon pooled connection string |
+| `WA_TOKEN`, `WA_PHONE_NUMBER_ID` | WhatsApp Cloud API token and phone number id |
+| `VERIFY_TOKEN` | Must match the verify token you enter in Meta's webhook settings |
+| `TELEGRAM_TOKEN` | Bot token from @BotFather |
+| `FOUNDER_CHAT_ID` | Chat where leads and alerts arrive |
+| `FOUNDER_USER_ID` | Your Telegram user id. Only this user can press buttons and run commands |
+| `TELEGRAM_WEBHOOK_SECRET` | Random string; Telegram sends it back on every call (step 6) |
+| `ANTHROPIC_API_KEY` | Claude Haiku, for understanding messages |
+| `ADMIN_PHONE` | Optional. Your WhatsApp number, for STATS, PLUMBERS and BROADCAST |
+| `WA_FALLBACK_TEMPLATE` | Optional. Approved template name used when WhatsApp refuses free text (see `WHATSAPP_TEMPLATES.md`) |
+
+The older names `WHATSAPP_TOKEN`, `PHONE_NUMBER_ID`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+are still read, so secrets already on Fly keep working. If Supabase secrets are still set,
+remove them: `fly secrets unset SUPABASE_URL SUPABASE_KEY`.
+
+### 5. Deploy
+
+```bash
+fly deploy --ha=false
+fly scale count 1
+curl https://plumberflow.fly.dev/health
+```
+
+Health should report `services: ready` and `scheduler: running`. Never run a second machine:
+both would run every timer.
+
+### 6. Telegram webhook
+
+Run once, with the same secret you set above:
+
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/setWebhook" -d url=https://plumberflow.fly.dev/telegram -d secret_token=<TELEGRAM_WEBHOOK_SECRET> -d 'allowed_updates=["message","callback_query"]'
+```
+
+### 7. Meta webhook
+
+1. developers.facebook.com → your app → **WhatsApp** → **Configuration** → **Webhook** → **Edit**
+2. **Callback URL:** `https://plumberflow.fly.dev/webhook`
+3. **Verify token:** the value of `VERIFY_TOKEN`
+4. Subscribe to the **messages** field.
+
+### 8. Templates
+
+Free text only works within 24 hours of the person's last message. Submit the templates in
+`WHATSAPP_TEMPLATES.md`, then tell the developer the approved names so they can be wired in.
+Until then, messages to plumbers and customers who have been quiet for a day will fail and
+show up in `fly logs`.
+
+## Day to day
+
+Founder commands, in the bot's Telegram chat:
+
+| Command | What it does |
+|---|---|
+| `/unpaid` | Invoices waiting for payment, with a short id |
+| `/paid <id>` | Mark an invoice paid; restores leads if it was the reason for a pause |
+| `/disputes` | Jobs that need your decision |
+| `/resolve <id> charge\|no_charge [note]` | Settle a dispute |
+
+Plumbers: `take`, `done R2400`, `no go`, `STATUS`, `PAUSE`, `RESUME`, `AREAS`, `SERVICES`, `HELP`.
+Admin (WhatsApp, from `ADMIN_PHONE`): `STATS`, `PLUMBERS`, `BROADCAST <message>`.
+
+| Command | What it does |
+|---|---|
+| `fly logs` | Stream live logs |
+| `fly status` | Check the machine is running |
+| `fly secrets list` | Which secrets are set (not their values) |
+| `fly deploy --ha=false` | Ship new code |
+
+## Local development and tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests that need Postgres are skipped unless `PLUMBERFLOW_TEST_DSN` points at a database you can
+write to, ideally a throwaway Neon branch (never `main`). They only create and drop a schema
+called `pf_test`.
+
+To run the app locally, copy `.env.example` to `.env`, fill it in, export the values, and run
+`uvicorn main:app --reload --port 8080`. Use ngrok if Meta or Telegram must reach it, and point
+the webhooks back at Fly afterwards.
