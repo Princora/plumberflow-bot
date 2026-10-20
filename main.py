@@ -444,7 +444,7 @@ async def handle_founder_command(update: dict):
             lines.append(f"{o['ref']} · {who.get('first_name') or '?'} · {o['credits']} credits · "
                          f"{credit_rand(o['price_cents'])}")
         await notify_founder("Credit orders waiting for payment\n\n" + "\n".join(lines)
-                             + "\n\nWhen the EFT is in: /credit <ref>")
+                             + "\n\nWhen the payment is in: /credit <ref>")
 
     elif cmd == "/credit":
         ref = args[0].upper() if args else ""
