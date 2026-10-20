@@ -423,3 +423,244 @@ def test_register_acceptance_idempotent(env):
     b = svc.register_acceptance(lead_id="L1", plumber_id=sipho["id"], customer_phone="0821111111",
                                 customer_name="Sarah", suburb="Fourways", keyword="geyser")
     assert a["id"] == b["id"] and len(store.list_jobs()) == 1
+
+
+# ───────────────────────── Reading plumber replies ─────────────────────────
+
+from verification.interpret import ClaudeReplyInterpreter
+from verification.parsing import classify_agreement, is_bare_amount, is_clean_done_message
+
+
+@pytest.mark.parametrize("text,cents", [
+    ("done R1800", 180000),
+    ("done 120 min job R1800", 180000),          # was R120
+    ("done 2024 R1800", 180000),                 # was R2,024
+    ("done, 3 geysers R4500", 450000),           # was None
+    ("Done 15 Oct R2400", 240000),               # was None
+    ("done R2k", 200000),
+    ("done 1800", 180000),
+    ("Job done. Charged R 2 400 incl. R350 callout", None),   # two prices: ask, don't guess
+    ("done 1800 incl 350 callout", None),
+    ("done, took 3 hours", None),
+    ("done 0821234567", None),                   # a phone number
+])
+def test_amount_parsing_does_not_guess(text, cents):
+    assert parse_amount_cents(text) == cents
+
+
+@pytest.mark.parametrize("text,verdict", [
+    ("that's wrong", "disputes"),
+    ("wrong", "disputes"),
+    ("that is not right", "disputes"),
+    ("I didn't do that job", "disputes"),
+    ("no that's right", "agrees"),               # was read as a dispute
+    ("yes correct, no problem", "agrees"),       # was read as a dispute
+    ("no dispute, it's correct", "agrees"),      # was read as a dispute
+    ("Nope all good", "agrees"),                 # was read as a dispute
+    ("yebo", "agrees"),
+    ("no", "unclear"),
+    ("hmm let me check", "unclear"),
+])
+def test_charge_reply_classification(text, verdict):
+    assert classify_agreement(text) == verdict
+
+
+def test_bare_no_can_be_told_it_means_disputes():
+    assert classify_agreement("no", bare_no="disputes") == "disputes"
+    assert classify_agreement("nope.", bare_no="disputes") == "disputes"
+
+
+def test_clean_message_shapes():
+    assert is_clean_done_message("done R2400") and is_clean_done_message("Done, 2 400")
+    assert not is_clean_done_message("done 120 min job R1800")
+    assert is_bare_amount("R2400") and is_bare_amount("2 400") and not is_bare_amount("about 2400")
+
+
+class FakeInterpreter:
+    def __init__(self, agreement=None, value=None):
+        self._agreement, self._value = agreement, value
+        self.agreement_calls, self.value_calls = [], []
+
+    def agreement(self, text, question):
+        self.agreement_calls.append(text)
+        return self._agreement
+
+    def job_value(self, text):
+        self.value_calls.append(text)
+        return self._value
+
+
+def with_interpreter(env, interpreter):
+    store, msg, clock, svc, sipho = env
+    svc.interpreter = interpreter
+    return store, msg, clock, svc, sipho
+
+
+def test_wordy_done_message_is_confirmed_before_it_is_logged(env):
+    store, msg, clock, svc, sipho = env
+    job = accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done 120 min job R1800")
+    assert store.get_job(job["id"])["job_value_cents"] in (None, 0)
+    assert msg.plumber_texts()[-1] == T.a4_confirm_value(180000)
+    assert svc.on_plumber_message(sipho["id"], "yes")
+    assert store.get_job(job["id"])["job_value_cents"] == 180000
+
+
+def test_confirmation_correction_and_no(env):
+    store, msg, clock, svc, sipho = env
+    job = accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done, 3 hours work and R1800 total R350 callout")
+    assert msg.plumber_texts()[-1] == T.a4_ask_value()      # two prices: asked, not guessed
+    svc.on_plumber_message(sipho["id"], "R1800 plus R350 callout")
+    assert msg.plumber_texts()[-1] == T.a4_value_retry()
+    svc.on_plumber_message(sipho["id"], "2150")
+    assert store.get_job(job["id"])["job_value_cents"] == 215000   # a bare amount is explicit
+
+    job2 = accept(svc, sipho, n=2, phone="0822222222", name="Thabo")
+    svc.on_plumber_message(sipho["id"], "done 120 min job R1800")
+    svc.on_plumber_message(sipho["id"], "no")
+    assert msg.plumber_texts()[-1] == T.a4_ask_value()
+    assert store.get_job(job2["id"])["job_value_cents"] in (None, 0)
+    svc.on_plumber_message(sipho["id"], "R1900")
+    assert store.get_job(job2["id"])["job_value_cents"] == 190000
+
+
+def test_confirmation_with_different_wordy_amount_asks_again(env):
+    store, msg, clock, svc, sipho = env
+    job = accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done 120 min job R1800")
+    svc.on_plumber_message(sipho["id"], "no it was R2000 cash")
+    assert msg.plumber_texts()[-1] == T.a4_confirm_value(200000)
+    assert store.get_job(job["id"])["job_value_cents"] in (None, 0)
+
+
+def test_unreadable_confirmation_logs_nothing(env):
+    store, msg, clock, svc, sipho = env
+    job = accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done 120 min job R1800")
+    assert svc.on_plumber_message(sipho["id"], "hmm")
+    assert svc.on_plumber_message(sipho["id"], "what")  is False
+    assert store.get_plumber_state(sipho["id"]) is None
+    assert store.get_job(job["id"])["job_value_cents"] in (None, 0)
+
+
+def test_model_reads_a_messy_amount_but_the_plumber_confirms_it(env):
+    store, msg, clock, svc, sipho = with_interpreter(env, FakeInterpreter(value=240000))
+    job = accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done, two thousand four hundred")
+    assert msg.plumber_texts()[-1] == T.a4_confirm_value(240000)
+    assert store.get_job(job["id"])["job_value_cents"] in (None, 0)   # not logged yet
+    svc.on_plumber_message(sipho["id"], "yes")
+    assert store.get_job(job["id"])["job_value_cents"] == 240000
+
+
+def test_without_a_model_a_messy_amount_just_asks(env):
+    store, msg, clock, svc, sipho = env
+    accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done, two thousand four hundred")
+    assert msg.plumber_texts()[-1] == T.a4_ask_value()
+
+
+def test_model_is_not_called_when_strict_parsing_is_sure(env):
+    fake = FakeInterpreter(value=999900, agreement="disputes")
+    store, msg, clock, svc, sipho = with_interpreter(env, fake)
+    job = accept(svc, sipho)
+    svc.on_plumber_message(sipho["id"], "done R1800")
+    assert store.get_job(job["id"])["job_value_cents"] == 180000
+    assert fake.value_calls == [] and fake.agreement_calls == []
+
+
+def to_a7(env):
+    store, msg, clock, svc, sipho = env
+    job = accept(svc, sipho)
+    clock.set(MON + timedelta(days=1, minutes=30))
+    svc.sweep_jobs()
+    svc.on_customer_reply("0821111111", "sorted")
+    clock.set(MON + timedelta(days=4))
+    svc.sweep_jobs()
+    assert store.get_plumber_state(sipho["id"])["step"] == "a7_reply"
+    return job
+
+
+@pytest.mark.parametrize("reply", ["no that's right", "yes correct, no problem", "Nope all good"])
+def test_agreeing_with_the_charge_does_not_pull_it(env, reply):
+    store, msg, clock, svc, sipho = env
+    job = to_a7(env)
+    assert svc.on_plumber_message(sipho["id"], reply)
+    assert store.get_job(job["id"])["status"] != "disputed"
+    assert not any("CONTESTED" in f for f in msg.founder)
+    assert store.get_plumber_state(sipho["id"]) is None
+
+
+def test_bare_no_after_a7_asks_instead_of_guessing(env):
+    store, msg, clock, svc, sipho = env
+    job = to_a7(env)
+    assert svc.on_plumber_message(sipho["id"], "no")
+    assert msg.plumber_texts()[-1] == T.a7_clarify()
+    assert store.get_job(job["id"])["status"] != "disputed"
+    assert svc.on_plumber_message(sipho["id"], "wrong")
+    assert store.get_job(job["id"])["status"] == "disputed"
+
+
+def test_unreadable_reply_to_a7_leaves_the_charge_and_flags_a_human(env):
+    store, msg, clock, svc, sipho = env
+    job = to_a7(env)
+    svc.on_plumber_message(sipho["id"], "hmm")
+    svc.on_plumber_message(sipho["id"], "let me think")
+    assert store.get_job(job["id"])["status"] != "disputed"
+    assert any("UNCLEAR REPLY ON CHARGE" in f for f in msg.founder)
+    assert store.get_plumber_state(sipho["id"]) is None
+
+
+def test_model_breaks_a_tie_on_an_unclear_a7_reply(env):
+    store, msg, clock, svc, sipho = with_interpreter(env, FakeInterpreter(agreement="disputes"))
+    job = to_a7(env)
+    assert svc.on_plumber_message(sipho["id"], "I was never even in that suburb that week")
+    assert store.get_job(job["id"])["status"] == "disputed"
+
+
+def test_a_failing_model_falls_back_to_asking(env):
+    store, msg, clock, svc, sipho = with_interpreter(env, FakeInterpreter(agreement=None))
+    to_a7(env)
+    svc.on_plumber_message(sipho["id"], "hmm")
+    assert msg.plumber_texts()[-1] == T.a7_clarify()
+
+
+# ───────────────────────── The model client ─────────────────────────
+
+class _Block:
+    type = "text"
+    def __init__(self, text): self.text = text
+
+
+class _Client:
+    def __init__(self, reply=None, error=None):
+        self.calls, self._reply, self._error = [], reply, error
+        self.messages = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return type("R", (), {"content": [_Block(self._reply)]})()
+
+
+def test_interpreter_reads_value_and_agreement():
+    ci = ClaudeReplyInterpreter(_Client('{"amount_rand": 2400}'))
+    assert ci.job_value("two thousand four hundred") == 240000
+    ci = ClaudeReplyInterpreter(_Client('{"label": "agrees"}'))
+    assert ci.agreement("yebo", "q") == "agrees"
+
+
+@pytest.mark.parametrize("reply", [
+    '{"amount_rand": null}', '{"amount_rand": 3}', '{"amount_rand": 9999999}',
+    '{"amount_rand": "2400"}', '{"amount_rand": true}', "not json", "",
+])
+def test_interpreter_rejects_implausible_values(reply):
+    assert ClaudeReplyInterpreter(_Client(reply)).job_value("x") is None
+
+
+def test_interpreter_failures_mean_no_answer():
+    assert ClaudeReplyInterpreter(_Client(error=RuntimeError("down"))).job_value("x") is None
+    assert ClaudeReplyInterpreter(_Client('{"label": "maybe"}')).agreement("x", "q") is None
+    assert ClaudeReplyInterpreter(_Client(error=RuntimeError("down"))).agreement("x", "q") is None

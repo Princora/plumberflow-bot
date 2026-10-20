@@ -58,6 +58,10 @@ def a4_value_retry() -> str:
     return "Amount in rand — for example 2400."
 
 
+def a4_confirm_value(job_value_cents: int) -> str:
+    return f"{rand(job_value_cents)}. Is that right? Reply YES, or send the right amount."
+
+
 def a5_value_logged(job_value_cents: int, fee_cents: int) -> str:
     return (
         f"Logged — {rand(job_value_cents)}.\n\n"
@@ -85,6 +89,10 @@ def a7_customer_confirmed(
         f"{rand(fee_cents)} on this week's invoice.\n\n"
         "If that's wrong, tell me now and I'll pull it."
     )
+
+
+def a7_clarify() -> str:
+    return "Is the charge right? Reply RIGHT to leave it, or WRONG and I'll pull it."
 
 
 def a7_pulled() -> str:
