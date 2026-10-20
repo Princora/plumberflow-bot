@@ -12,6 +12,8 @@ from fastapi import FastAPI, Request, Response
 
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
+from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
+from intake import parse_urgency_text
 from dispatch.telegram import handle_telegram_update
 from services import Services, build_services
 
@@ -185,18 +187,6 @@ def parse_job_type_text(text: str) -> str | None:
         return "Leak"
     if any(w in t for w in ["other", "general", "misc"]):
         return "Other"
-    return None
-
-def parse_urgency_text(text: str) -> str | None:
-    t = text.lower()
-    if any(w in t for w in ["now", "asap", "emergency", "right now", "immediately", "urgent", "burst"]):
-        return "Emergency — right now"
-    if any(w in t for w in ["today", "this afternoon", "this morning", "few hours", "tonight"]):
-        return "Today"
-    if any(w in t for w in ["week", "no rush", "whenever", "not urgent", "few days"]):
-        return "This week"
-    if any(w in t for w in ["quote", "price", "cost", "estimate", "how much"]):
-        return "Just a quote"
     return None
 
 _YES_WORDS = {"yes", "yebo", "ya", "yep", "yeah", "sorted", "done", "all good", "all sorted", "fixed"}
@@ -563,6 +553,102 @@ async def classify_job_reply(text: str) -> tuple[str, int | None] | None:
         return None
 
 
+URGENCY_LABELS = ["Emergency — right now", "Today", "This week", "Just a quote", "unclear"]
+
+URGENCY_SCHEMA = {
+    "type": "object",
+    "properties": {"label": {"type": "string", "enum": URGENCY_LABELS}},
+    "required": ["label"],
+    "additionalProperties": False,
+}
+
+URGENCY_SYSTEM_PROMPT = """You read a WhatsApp reply from a homeowner in Johannesburg who was asked "How urgent is it: right now, today, this week, or just a quote?" about a plumbing problem.
+
+Labels:
+- Emergency — right now: water is flooding or damaging things, or they want someone immediately or within the hour.
+- Today: they want someone later today or tonight.
+- This week: it can wait a few days, tomorrow, or "no rush".
+- Just a quote: they only want a price or estimate.
+- unclear: the reply does not say how soon.
+
+"Not urgent" and "not an emergency" are NOT emergencies. If it is genuinely between two labels, pick the more urgent one. Return ONLY valid JSON matching the schema."""
+
+SUBURB_SYSTEM_PROMPT = """You match what a person typed to one suburb of Johannesburg, South Africa, from a fixed list. They may have a typo, a street address, an extension number or extra words.
+
+Answer with the suburb from the list that the text clearly refers to. If it is not clearly one suburb on the list (a different place, two suburbs, a region, or you are unsure), answer "unknown". Never pick a suburb just because the name looks similar: Sandton, Sandown and Sandhurst are different suburbs. Return ONLY valid JSON matching the schema."""
+
+SUBURB_SCHEMA = {
+    "type": "object",
+    "properties": {"suburb": {"type": "string", "enum": list(DISPLAY_NAMES) + ["unknown"]}},
+    "required": ["suburb"],
+    "additionalProperties": False,
+}
+
+
+async def _haiku_json(system: str, schema: dict, text: str, max_tokens: int) -> dict | None:
+    if not anthropic_client:
+        return None
+    try:
+        response = await anthropic_client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=max_tokens,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": text}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+        block = next((b.text for b in response.content if b.type == "text"), None)
+        return json.loads(block) if block else None
+    except Exception as e:
+        logger.warning(f"Haiku call failed: {e}")
+        return None
+
+
+async def classify_urgency(text: str) -> str | None:
+    """One of the four urgency labels, or None if the model is unavailable or cannot tell."""
+    result = await _haiku_json(URGENCY_SYSTEM_PROMPT, URGENCY_SCHEMA, text, 30)
+    label = (result or {}).get("label")
+    return label if label in URGENCY_TIERS else None
+
+
+async def resolve_suburb_text(text: str) -> str | None:
+    """Canonical suburb key for typed text: strict matching first, the model only to break a tie.
+    The model can only pick from the list, and its answer is checked against it."""
+    key = resolve_suburb(text)
+    if key:
+        return key
+    result = await _haiku_json(SUBURB_SYSTEM_PROMPT, SUBURB_SCHEMA, text, 30)
+    picked = (result or {}).get("suburb", "")
+    return picked.lower() if picked.lower() in CANONICAL else None
+
+
+_AREA_SPLIT = re.compile(r",|;|\n|&|/|\band\b", re.I)
+
+
+async def normalise_areas(text: str) -> tuple[list[str], list[str]]:
+    """A plumber's typed suburb list -> (areas to store, items not on the suburb list).
+    Recognised suburbs are stored under their canonical key. Anything else is kept as typed,
+    lowercased, so it still matches by name, and is reported back so the plumber knows."""
+    areas: list[str] = []
+    unknown: list[str] = []
+    for raw in (a.strip() for a in _AREA_SPLIT.split(text)):
+        if not raw:
+            continue
+        key = await resolve_suburb_text(raw)
+        value = key or re.sub(r"\s+", " ", raw.lower())
+        if value not in areas:
+            areas.append(value)
+        if not key and raw not in unknown:
+            unknown.append(raw)
+    return areas, unknown
+
+
+def _unknown_areas_note(unknown: list[str]) -> str:
+    return (
+        f"I don't have {', '.join(u.title() for u in unknown)} on my suburb list yet, so I've saved "
+        "it as you typed it. Jobs there are matched by hand."
+    )
+
+
 async def handle_job_reply(sender: str, text: str) -> bool:
     """A customer with a job awaiting their answer: classify, then hand to verification."""
     quick = quick_job_reply_label(text)
@@ -597,8 +683,10 @@ async def handle_nlu_result(sender: str, text: str, nlu: dict):
             state["urgency"] = nlu["urgency"]
             state["stage"] = "location"
         if nlu.get("location") and "urgency" in state:
-            state["location"] = nlu["location"]
-            state["stage"] = "photo"
+            key = await resolve_suburb_text(nlu["location"])
+            if key:    # not on the list: leave the stage as location and ask
+                state["location"] = display_name(key)
+                state["stage"] = "photo"
         conversations[sender] = state
 
         # Send the model's friendly acknowledgment, then prompt for the next step.
@@ -872,7 +960,7 @@ async def handle_plumber_command_state(sender: str, text: str):
         return
 
     if command == "update_areas":
-        areas = [a.strip().lower() for a in text.split(",") if a.strip()]
+        areas, unknown = await normalise_areas(text)
         if not areas:
             await send(sender, "Please list at least one suburb, or type *CANCEL*.")
             return
@@ -884,6 +972,8 @@ async def handle_plumber_command_state(sender: str, text: str):
             await send(sender, "⚠️ Something went wrong updating your areas. Please try again.")
             return
         await send(sender, f"✅ Your coverage areas are updated to:\n\n📍 {', '.join(a.title() for a in areas)}")
+        if unknown:
+            await send(sender, _unknown_areas_note(unknown))
         return
 
     if command == "update_services":
@@ -1040,8 +1130,7 @@ async def continue_customer_flow(sender: str, text: str):
         # Accept numeric shortcut (1-4) or natural language
         urgency = URGENCY_LEVELS.get(text_number) or parse_urgency_text(text)
         if not urgency:
-            nlu = await classify_message(text)
-            urgency = nlu.get("urgency") if nlu else None
+            urgency = await classify_urgency(text)
         if not urgency:
             await send(sender, (
                 "How urgent is it — right now, today, this week, or just a quote?"
@@ -1052,8 +1141,20 @@ async def continue_customer_flow(sender: str, text: str):
         await send(sender, "Which suburb are you in?")
 
     elif stage == "location":
-        state["location"] = text.strip()
-        state["stage"]    = "photo"
+        key = await resolve_suburb_text(text)
+        if key:
+            state["location"] = display_name(key)
+        else:
+            state["location_tries"] = state.get("location_tries", 0) + 1
+            if state["location_tries"] < 2:
+                await send(sender, (
+                    "I didn't recognise that suburb. Which suburb are you in? "
+                    "For example Randburg, Sandton or Fourways."
+                ))
+                return
+            # Second time: take it as typed so the lead is not lost. The founder routes it by hand.
+            state["location"] = text.strip()
+        state["stage"] = "photo"
         await send(sender, (
             "Send a photo of the problem if you can — it helps the plumber quote accurately.\n\n"
             "Reply SKIP to continue without one."
@@ -1163,10 +1264,12 @@ async def handle_plumber_onboarding(sender: str, text: str):
         ))
 
     elif stage == "ob_area":
-        areas = [a.strip().lower() for a in text.split(",") if a.strip()]
+        areas, unknown = await normalise_areas(text)
         if not areas:
             await send(sender, "Please list at least one suburb. Example: *Randburg, Sandton*")
             return
+        if unknown:
+            await send(sender, _unknown_areas_note(unknown))
         state["areas"] = areas
         state["stage"] = "ob_availability"
         await send(sender, (

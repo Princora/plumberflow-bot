@@ -365,3 +365,155 @@ def test_a_failing_sweep_does_not_stop_the_others(env, monkeypatch):
     monkeypatch.setattr(env.services.disp, "run_sweeps", lambda: ran.append("dispatch"))
     main.run_sweeps()
     assert ran == ["patterns", "invoices", "dispatch"]
+
+
+# ───────────────────────── suburbs and urgency ─────────────────────────
+
+import json
+from types import SimpleNamespace
+
+
+NLU_ANSWER = {"You are the NLU": {"intent": "request_plumber", "job_type": None, "urgency": None,
+                                  "location": None, "reply": "Sure."}}
+
+
+class FakeAnthropic:
+    """Stands in for AsyncAnthropic. `answers` maps a phrase in the system prompt to the JSON to return."""
+
+    def __init__(self, answers):
+        self.answers, self.calls = answers, []
+        self.messages = self
+
+    async def create(self, **kw):
+        system = kw["system"][0]["text"]
+        user = kw["messages"][0]["content"]
+        self.calls.append((system[:40], user))
+        for phrase, reply in self.answers.items():
+            if phrase in system:
+                body = reply(user) if callable(reply) else reply
+                return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(body))])
+        raise AssertionError("unexpected model call")
+
+
+def lead(env):
+    return next(iter(env.store.leads.values()))
+
+
+def suggested(env):
+    sends = [p for m, p in env.tg_calls if m == "sendMessage"]
+    return [b["callback_data"] for row in sends[-1]["reply_markup"]["inline_keyboard"] for b in row]
+
+
+def test_customer_suburb_with_an_extension_still_finds_the_plumber(env):
+    sipho = env.add_plumber(areas=("rivonia",))
+    env.run_lead_flow(suburb="Rivonia Ext 3")
+    assert lead(env)["suburb"] == "Rivonia"
+    assert f"o:L-0001:{p8(sipho)}" in suggested(env)
+
+
+def test_plumber_areas_typed_any_old_way_still_match(env):
+    sipho = env.add_plumber(areas=("Rivonia.", " HYDEPARK ", "fourways"))
+    env.run_lead_flow(suburb="Hyde Park")
+    assert f"o:L-0001:{p8(sipho)}" in suggested(env)
+
+
+def test_an_unrecognised_suburb_is_asked_once_then_taken_as_typed(env):
+    env.add_plumber()
+    for text in ("plumber", "burst pipe", "now", "Alexandra"):
+        env.post_wa(CUSTOMER, text=text)
+    assert "I didn't recognise that suburb" in env.wa_text_to(CUSTOMER)[-1]
+    assert main.conversations[CUSTOMER]["stage"] == "location"
+    env.post_wa(CUSTOMER, text="Alexandra")
+    assert main.conversations[CUSTOMER]["stage"] == "photo"
+    env.post_wa(CUSTOMER, text="skip")
+    assert lead(env)["suburb"] == "Alexandra"          # not lost; the founder routes it
+
+
+def test_the_model_can_fix_a_typo_but_only_to_a_real_suburb(env, monkeypatch):
+    env.add_plumber(areas=("sandton",))
+    fake = FakeAnthropic({**NLU_ANSWER, "match what a person typed": lambda t: {"suburb": "Sandton" if t == "Sanderton" else "Atlantis"}})
+    monkeypatch.setattr(main, "anthropic_client", fake)
+    env.run_lead_flow(suburb="Sanderton")
+    assert lead(env)["suburb"] == "Sandton"
+
+    # An invented suburb is rejected, so the customer is asked rather than sent to the wrong place.
+    for text in ("plumber", "burst pipe", "now", "Gotham"):
+        env.post_wa("27829991111", text=text)
+    assert "I didn't recognise that suburb" in env.wa_text_to("27829991111")[-1]
+
+
+def test_the_model_is_not_asked_when_the_suburb_is_clear(env, monkeypatch):
+    env.add_plumber()
+    fake = FakeAnthropic(NLU_ANSWER)
+    monkeypatch.setattr(main, "anthropic_client", fake)
+    env.run_lead_flow(suburb="Randburg")
+    assert [c for c in fake.calls if "match what a person typed" in c[0] or "suburb" in c[0].lower()] == []
+    assert lead(env)["suburb"] == "Randburg"
+
+
+def test_plumber_area_list_is_canonicalised_and_unknown_places_are_flagged(env):
+    sipho = env.add_plumber()
+    env.post_wa(PLUMBER_PHONE, text="AREAS")
+    env.post_wa(PLUMBER_PHONE, text="Randburg and Sandton, hydepark, Rivonia Ext 3, Alexandra")
+    assert env.store.plumbers[sipho["id"]]["areas"] == [
+        "randburg", "sandton", "hyde park", "rivonia", "alexandra"]
+    sent = env.wa_text_to(PLUMBER_PHONE)
+    assert any("Alexandra" in t and "on my suburb list" in t for t in sent)
+    assert not any("Randburg" in t and "on my suburb list" in t for t in sent)
+
+
+def test_onboarding_canonicalises_areas(env):
+    phone = "27835550000"
+    for text in ("join", "Lerato", "7, PIRB123", "1, 2", "Rivonia Ext 3, fourwys", "1", "YES"):
+        env.post_wa(phone, text=text)
+    assert env.store.find_plumber_by_whatsapp(phone)["areas"] == ["rivonia", "fourways"]
+
+
+def urgency_of(env):
+    for text in ("plumber", "burst pipe"):
+        env.post_wa(CUSTOMER, text=text)
+
+
+@pytest.mark.parametrize("answer", ["not urgent", "it's not an emergency", "no rush"])
+def test_not_urgent_is_not_an_emergency(env, answer):
+    env.add_plumber()
+    for text in ("plumber", "burst pipe", answer, "Randburg", "skip"):
+        env.post_wa(CUSTOMER, text=text)
+    assert "This week" in lead(env)["summary"]
+    assert "Emergency" not in lead(env)["summary"]
+    confirm = env.wa_text_to(CUSTOMER)[-1]
+    assert "stop-valve" not in confirm                  # no flood advice for a relaxed job
+
+
+def test_a_plain_emergency_is_still_an_emergency(env):
+    env.add_plumber()
+    for text in ("plumber", "burst pipe", "it's an emergency", "Randburg", "skip"):
+        env.post_wa(CUSTOMER, text=text)
+    assert "Emergency — right now" in lead(env)["summary"]
+    assert "stop-valve" in env.wa_text_to(CUSTOMER)[-1]
+
+
+def test_an_answer_the_keywords_cannot_read_goes_to_the_model(env, monkeypatch):
+    env.add_plumber()
+    fake = FakeAnthropic({**NLU_ANSWER, "How urgent is it": {"label": "This week"}})
+    monkeypatch.setattr(main, "anthropic_client", fake)
+    for text in ("plumber", "burst pipe", "can someone come tomorrow morning", "Randburg", "skip"):
+        env.post_wa(CUSTOMER, text=text)
+    assert "This week" in lead(env)["summary"]
+    assert [u for s, u in fake.calls if s.startswith("You read a WhatsApp reply")] == [
+        "can someone come tomorrow morning"]
+
+
+def test_with_no_model_an_unreadable_urgency_is_asked_again(env):
+    for text in ("plumber", "burst pipe", "can someone come tomorrow morning"):
+        env.post_wa(CUSTOMER, text=text)
+    assert main.conversations[CUSTOMER]["stage"] == "urgency"
+    assert "How urgent is it" in env.wa_text_to(CUSTOMER)[-1]
+
+
+def test_the_model_saying_unclear_asks_again(env, monkeypatch):
+    monkeypatch.setattr(main, "anthropic_client",
+                        FakeAnthropic({**NLU_ANSWER, "How urgent is it": {"label": "unclear"}}))
+    for text in ("plumber", "burst pipe", "hmm not sure"):
+        env.post_wa(CUSTOMER, text=text)
+    assert main.conversations[CUSTOMER]["stage"] == "urgency"

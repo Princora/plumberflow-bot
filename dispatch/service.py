@@ -20,6 +20,7 @@ from verification import templates as VT
 
 from . import templates as T
 from .phone import normalize_phone
+from .suburbs import area_key
 
 TAKE_RE = re.compile(
     r"^\s*(?:i['’]?ll\s+)?(?:take|taking|accept|yes|me)(?:\s+it)?(?:\s+(?:l-?)?(\d{1,6}))?[\s.,]*$",
@@ -81,10 +82,11 @@ class DispatchService:
 
     def _matching(self, lead: dict) -> list[dict]:
         """Active, unpaused plumbers who cover the lead's suburb."""
-        suburb = (lead.get("suburb") or "").strip().lower()
+        # Compare by canonical suburb, so "Rivonia Ext 3" finds the plumber who typed "rivonia".
+        suburb = area_key(lead.get("suburb"))
         out = []
         for p in self.store.list_active_plumbers():
-            areas = {a.strip().lower() for a in (p.get("areas") or [])}
+            areas = {area_key(a) for a in (p.get("areas") or [])}
             if suburb and suburb in areas and not self._is_paused(p):
                 out.append(p)
         return out
