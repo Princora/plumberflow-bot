@@ -225,3 +225,13 @@ called `pf_test`.
 To run the app locally, copy `.env.example` to `.env`, fill it in, export the values, and run
 `uvicorn main:app --reload --port 8080`. Use ngrok if Meta or Telegram must reach it, and point
 the webhooks back at Fly afterwards.
+
+
+## Automatic deploys
+
+Merging to `main` runs the tests and then deploys to Fly (`.github/workflows/deploy.yml`); a pull request
+only runs the tests. Setup, once: `fly tokens create deploy -a plumberflow`, then add the token as the
+repository secret `FLY_API_TOKEN` (Settings > Secrets and variables > Actions). The deploy uses
+blue-green and the `/health` check, so a version that cannot start never replaces the running one.
+Migrations are **not** run automatically: apply a new one (see above) before merging code that needs it.
+Fly secrets are separate and are still set with `fly secrets`.
