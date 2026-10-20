@@ -106,6 +106,7 @@ async def db(fn, *args, **kwargs):
 # ---------------------------------------------------------------------------
 conversations:         dict[str, dict] = {}   # customer WhatsApp flows
 plumber_onboarding:    dict[str, dict] = {}   # plumber onboarding flows
+plumber_name_asks:      dict[str, int] = {}    # phone -> times we have asked a nameless plumber for their name
 plumber_command_state: dict[str, dict] = {}   # multi-step plumber commands (AREAS, SERVICES)
 profile_names:         dict[str, str] = {}    # WhatsApp number → first name from the sender's profile
 _seen_message_ids:     deque = deque(maxlen=1000)
@@ -932,9 +933,40 @@ async def handle_plumber_text(phone: str, text: str):
         await send(phone, await already_registered_text(plumber, "Type *HELP* to see all commands."))
         return
     if plumber and await try_plumber_command(phone, text_upper, plumber):
+        await ask_for_missing_name(phone, text, plumber, answering=False)
+        return
+    if plumber and await ask_for_missing_name(phone, text, plumber, answering=True):
         return
 
     await forward_plumber_to_founder(phone, text)
+
+MAX_NAME_ASKS = 2
+
+def _has_no_name(plumber: dict) -> bool:
+    return (plumber.get("first_name") or "").strip().lower() in ("", "unnamed")
+
+async def ask_for_missing_name(phone: str, text: str, plumber: dict, *, answering: bool) -> bool:
+    """Plumbers added by hand have no name. Ask for it the next time they message us.
+
+    With answering=True the message may be their reply: a name is saved and True is returned.
+    Otherwise (or when the reply holds no name) the question is asked, at most MAX_NAME_ASKS times.
+    """
+    if not _has_no_name(plumber):
+        plumber_name_asks.pop(phone, None)
+        return False
+    asked = plumber_name_asks.get(phone, 0)
+    if answering and asked:
+        first = parse_first_name(text)
+        if first:
+            await db(S.store.update_plumber, plumber["id"], first_name=first)
+            plumber_name_asks.pop(phone, None)
+            await send(phone, f"Thanks, {first}. Your name is saved.")
+            return True
+    if asked >= MAX_NAME_ASKS:
+        return False
+    plumber_name_asks[phone] = asked + 1
+    await send(phone, "Quick one: what's your first name? Reply with just your name, for example *Sipho*.")
+    return False
 
 # ===========================================================================
 # PLUMBER COMMANDS

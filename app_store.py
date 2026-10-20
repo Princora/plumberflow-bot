@@ -14,7 +14,7 @@ PLUMBER_INSERT = frozenset({
     "first_name", "whatsapp", "experience_years", "pirb_registered",
     "services", "areas", "availability",
 })
-PLUMBER_EDITABLE = frozenset({"areas", "services", "availability"})
+PLUMBER_EDITABLE = frozenset({"areas", "services", "availability", "first_name"})
 _ID_PREFIX = re.compile(r"^[0-9a-f-]{4,36}$")
 
 
