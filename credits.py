@@ -36,3 +36,15 @@ def parse_pack(text: str) -> int | None:
     m = _PACK_REPLY.match(text or "")
     n = int(m.group(1)) if m else None
     return n if n in PACK_DISCOUNT_PERCENT else None
+
+
+def local_number(raw: str) -> str:
+    """A South African cellphone number the way people dial it: +27 82 123 4567 or 27821234567
+    become 0821234567. Anything that isn't a plain SA number is returned as typed, minus spaces."""
+    text = re.sub(r"[\s\-()]", "", raw or "")
+    digits = text[1:] if text.startswith("+") else text
+    if digits.startswith("0027"):
+        digits = digits[2:]
+    if digits.isdigit() and digits.startswith("27") and len(digits) == 11:
+        return "0" + digits[2:]
+    return text

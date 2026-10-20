@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from config_check import ConfigError
-from credits import CREDIT_PRICE_CENTS, PACK_SIZES, pack_line, pack_price_cents, parse_pack, rand as credit_rand
+from credits import CREDIT_PRICE_CENTS, PACK_SIZES, local_number, pack_line, pack_price_cents, parse_pack, rand as credit_rand
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
 from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
@@ -1149,7 +1149,7 @@ def _buy_menu(plumber: dict) -> str:
 
 def _payment_instructions(order: dict) -> str:
     amount = credit_rand(order["price_cents"])
-    number = (os.environ.get("PAYSHAP_NUMBER") or "").strip()
+    number = local_number(os.environ.get("PAYSHAP_NUMBER") or "")
     holder = (os.environ.get("PAYSHAP_NAME") or "").strip()
     details = (os.environ.get("CREDIT_PAYMENT_DETAILS") or "").replace("|", "\n").strip()
     if number:
