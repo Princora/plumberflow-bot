@@ -113,7 +113,8 @@ fly secrets set DATABASE_URL="<pooled-url>" WA_TOKEN="<token>" WA_PHONE_NUMBER_I
 | `FOUNDER_USER_ID` | Your Telegram user id. Only this user can press buttons and run commands |
 | `TELEGRAM_WEBHOOK_SECRET` | Random string; Telegram sends it back on every call (step 6) |
 | `ANTHROPIC_API_KEY` | Claude Haiku, for understanding messages |
-| `ADMIN_PHONE` | Optional. Your WhatsApp number, for STATS, PLUMBERS and BROADCAST |
+| `ADMIN_PHONE` | Optional. Your WhatsApp number, for STATS, PLUMBERS and BROADCAST. Only you can use these, and only when `WA_APP_SECRET` is set |
+| `WA_APP_SECRET` | Meta app secret (developers.facebook.com > your app > Settings > Basic > App secret). Every WhatsApp webhook call must then carry Meta's signature, so nobody can pose as a phone number. **Without it the WhatsApp admin commands are switched off** (`/health` shows `admin: off: set WA_APP_SECRET`) |
 | `PAYSHAP_NUMBER` | Needed to sell credits by PayShap: the cellphone number plumbers pay, e.g. `0821234567`. Shown with their order and reference |
 | `PAYSHAP_NAME` | Optional. The name that shows when they pay that number, so they know it is right |
 | `CREDIT_PAYMENT_DETAILS` | Optional. Used only when `PAYSHAP_NUMBER` is not set. Your bank details as text; use `\|` for a new line, e.g. `FNB \| Princora \| Acc 62... \| Branch 250655`. Sent to a plumber with their order |

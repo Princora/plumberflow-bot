@@ -27,6 +27,9 @@ from services import Services, build_services
 VERIFY_TOKEN            = os.environ.get("VERIFY_TOKEN", "plumberflow_verify_123")
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 ADMIN_PHONE             = os.environ.get("ADMIN_PHONE", "")     # your WhatsApp number (no +)
+# Meta's app secret. With it, every WhatsApp webhook call must carry Meta's signature, so nobody
+# can pretend to be a phone number (yours included). Without it, WhatsApp admin commands are off.
+WA_APP_SECRET           = os.environ.get("WA_APP_SECRET") or os.environ.get("META_APP_SECRET") or ""
 ANTHROPIC_API_KEY       = os.environ.get("ANTHROPIC_API_KEY")   # for the Haiku 4.5 NLU layer
 try:
     TRIAL_LEADS = int(os.environ.get("TRIAL_LEADS", "2"))  # free jobs given when you /approve a new plumber
@@ -85,6 +88,9 @@ async def lifespan(app: FastAPI):
             raise
     if not TELEGRAM_WEBHOOK_SECRET:
         logger.warning("TELEGRAM_WEBHOOK_SECRET is not set: /telegram accepts any caller")
+    if ADMIN_PHONE and not WA_APP_SECRET:
+        logger.warning("WA_APP_SECRET is not set: WhatsApp admin commands are switched off "
+                       "(Meta's signature cannot be checked, so the sender number cannot be trusted)")
     _scheduler = BackgroundScheduler(timezone="UTC")
     _scheduler.add_job(run_sweeps, "interval", minutes=SWEEP_MINUTES,
                        id="sweeps", max_instances=1, coalesce=True)
@@ -223,7 +229,13 @@ async def notify_founder(text: str):
         logger.error(f"Telegram notify failed: {e}")
 
 def is_admin(phone: str) -> bool:
-    return bool(ADMIN_PHONE) and normalize_phone(phone) == normalize_phone(ADMIN_PHONE)
+    """Only the ADMIN_PHONE number, and only when Meta's signature is being checked: the sender
+    number in a webhook call is just text unless the call is proven to come from Meta."""
+    return bool(ADMIN_PHONE) and bool(WA_APP_SECRET) and normalize_phone(phone) == normalize_phone(ADMIN_PHONE)
+
+def _signed_by_meta(raw: bytes, header: str) -> bool:
+    expected = "sha256=" + hmac.new(WA_APP_SECRET.encode(), raw, "sha256").hexdigest()
+    return hmac.compare_digest(expected, header or "")
 
 async def already_registered_text(plumber: dict, tail: str) -> str:
     name = plumber.get("first_name") or "friend"
@@ -285,7 +297,16 @@ async def process_whatsapp_message(m: dict):
 
 @app.post("/webhook")
 async def receive(request: Request):
-    body = await request.json()
+    raw = await request.body()
+    if WA_APP_SECRET and not _signed_by_meta(raw, request.headers.get("X-Hub-Signature-256", "")):
+        logger.warning("webhook call without a valid Meta signature rejected")
+        return Response(content="Forbidden", status_code=403)
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        return Response(content="Bad request", status_code=400)
+    if not isinstance(body, dict):
+        return Response(content="Bad request", status_code=400)
     for e in body.get("entry", []):
         for change in e.get("changes", []):
             value = change.get("value", {})
@@ -1703,5 +1724,6 @@ async def health():
         "services":  "ready" if S else "not started",
         "database":  database,
         "scheduler": scheduler,
-        "admin":     "configured" if ADMIN_PHONE else "not configured",
+        "admin":     ("not configured" if not ADMIN_PHONE
+                      else "configured" if WA_APP_SECRET else "off: set WA_APP_SECRET"),
     }, status_code=200 if healthy else 503)
