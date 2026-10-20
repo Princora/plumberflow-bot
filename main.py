@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, Response
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
 from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
-from intake import parse_experience, parse_job_type_text, parse_pirb, parse_urgency_text
+from intake import parse_experience, parse_first_name, parse_job_type_text, parse_pirb, parse_urgency_text
 from dispatch.telegram import handle_telegram_update
 from services import Services, build_services
 
@@ -1316,13 +1316,14 @@ async def handle_plumber_onboarding(sender: str, text: str):
         return
 
     if stage == "ob_name":
-        first = text.strip().split(" ")[0][:40].title()
-        if not first or not first.replace("-", "").replace("'", "").isalpha():
-            await send(sender, "Please reply with your first name, for example *Sipho*.")
+        first = parse_first_name(text)
+        if not first:
+            await send(sender, "I didn't catch your name. Please reply with just your first name, for example *Sipho*.")
             return
         state["first_name"] = first
         state["stage"] = "ob_experience"
         await send(sender, (
+            f"Thanks, {first}.\n\n"
             "━━━━━━━━━━━━━━━\n"
             "Step 2 of 6\n\n"
             "How many years of plumbing experience do you have?\n\n"

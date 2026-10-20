@@ -174,3 +174,41 @@ def test_pirb_in_the_same_message(text, registered, number):
 def test_pirb_asked_on_its_own(text, registered, number):
     pirb = parse_pirb(text, bare_min_digits=3, skip_years=False)
     assert (pirb.registered, pirb.number) == (registered, number)
+
+
+# ───────────────────────── onboarding: first name ─────────────────────────
+
+from intake import parse_first_name
+
+
+@pytest.mark.parametrize("text,name", [
+    ("Sipho", "Sipho"),
+    ("  sipho  ", "Sipho"),
+    ("LERATO", "Lerato"),
+    ("Sipho Dlamini", "Sipho"),                       # the first name only
+    ("my name is Sipho", "Sipho"),                    # was saved as "My"
+    ("I'm Sipho", "Sipho"),                           # was saved as "I'M"
+    ("Hi, I'm Sipho", "Sipho"),
+    ("it's Thabo", "Thabo"),                          # was saved as "It'S"
+    ("This is Lerato from Soweto", "Lerato"),         # was saved as "This"
+    ("Thabo Mokoena the plumber", "Thabo"),
+    ("Mr Dlamini", "Dlamini"),                        # was saved as "Mr"
+    ("Dr Naidoo", "Naidoo"),
+    ("Sipho!", "Sipho"),                              # was rejected
+    ("Sipho 👷", "Sipho"),
+    ("Nomvula-Grace", "Nomvula-Grace"),
+    ("O'Brien", "O'Brien"),
+    ("McDonald", "McDonald"),                         # capitals kept as typed
+    ("Zoë", "Zoë"),
+])
+def test_first_name_in_plain_words(text, name):
+    assert parse_first_name(text) == name
+
+
+@pytest.mark.parametrize("text", [
+    "hello", "hi", "yes", "ja", "ok", "no", "join", "test",     # were all accepted as names
+    "123", "x", "", "my", "Mr", "😀", "R2400",
+    "a" * 41,
+])
+def test_what_is_not_a_name_is_asked_again(text):
+    assert parse_first_name(text) is None

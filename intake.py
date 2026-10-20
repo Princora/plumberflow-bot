@@ -199,3 +199,45 @@ class Experience:
 
 def parse_experience(text: str, today: date | None = None) -> Experience:
     return Experience(parse_years(text, today), parse_pirb(text))
+
+
+# ───────────────────────── Plumber onboarding: first name ─────────────────────────
+#
+# The first thing the bot asks is "What's your first name?", and every later message
+# uses it ("Sipho, Fourways geyser is still open"). People answer in sentences, so
+# taking the first word saved "my name is Sipho" as "My", "I'm Sipho" as "I'M", and
+# "hello" or "yes" as a name. This skips the filler and refuses things that are not names.
+
+_NAME_WORD = re.compile(r"[^\W\d_]+(?:['’\-][^\W\d_]+)*")
+_NAME_FILLER = frozenset({
+    # greetings and "my name is …"
+    "hi", "hello", "hey", "howzit", "sawubona", "molo", "dumela", "goeie", "more", "dag",
+    "my", "name", "names", "is", "its", "it's", "it’s", "i", "im", "i'm", "i’m", "am", "this", "call",
+    "me", "the", "ek", "dit", "hierdie", "die", "naam", "from", "here",
+    # titles
+    "mr", "mrs", "ms", "miss", "mnr", "mev", "dr", "prof", "sir", "madam",
+})
+_NOT_A_NAME = frozenset({
+    "yes", "yebo", "ja", "yep", "yeah", "no", "nope", "nee", "ok", "okay", "sure", "thanks", "thank",
+    "join", "register", "start", "stop", "help", "test", "plumber", "plumbers", "admin", "unnamed",
+    "none", "skip", "cancel", "what", "why", "how", "who", "please", "pls",
+})
+MAX_NAME_LENGTH = 40
+
+
+def parse_first_name(text: str) -> str | None:
+    """The plumber's first name from a reply, or None if it does not contain one.
+
+    "my name is sipho", "I'm Sipho Dlamini", "Hi, this is Lerato from Soweto" and "Sipho 👷"
+    all give the name; "hello", "yes", "123" and "x" give None, so the bot asks again.
+    """
+    words = _NAME_WORD.findall(text)
+    while words and words[0].lower() in _NAME_FILLER:
+        words.pop(0)
+    if not words:
+        return None
+    name = words[0]
+    if len(name) < 2 or len(name) > MAX_NAME_LENGTH or name.lower() in _NOT_A_NAME:
+        return None
+    # Keep names typed with their own capitals (McDonald, DeWet); tidy all-lower and ALL-CAPS.
+    return name.title() if name.islower() or name.isupper() else name

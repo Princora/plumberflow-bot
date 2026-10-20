@@ -876,3 +876,40 @@ def test_only_the_plumber_who_takes_it_uses_a_trial_lead(env):
     env.post_wa("27821110001", text="take")
     assert env.store.plumbers[a["id"]]["trial_stage"] == 2
     assert env.store.plumbers[b["id"]]["trial_stage"] == 3               # offered, lost the race, kept theirs
+
+
+# ───────────────────────── onboarding: the name ─────────────────────────
+
+def test_the_first_question_is_the_name(env):
+    say(env, NEW_PLUMBER, "join")
+    assert stage(NEW_PLUMBER) == "ob_name"
+    assert "What's your first name?" in env.wa_text_to(NEW_PLUMBER)[-1]
+
+
+@pytest.mark.parametrize("answer,saved", [
+    ("Sipho", "Sipho"),
+    ("my name is Sipho Dlamini", "Sipho"),
+    ("I'm Sipho", "Sipho"),
+    ("This is Lerato from Soweto", "Lerato"),
+])
+def test_the_name_is_read_from_a_normal_answer_and_echoed_back(env, answer, saved):
+    say(env, NEW_PLUMBER, "join", answer)
+    assert main.plumber_onboarding[NEW_PLUMBER]["first_name"] == saved
+    assert stage(NEW_PLUMBER) == "ob_experience"
+    assert env.wa_text_to(NEW_PLUMBER)[-1].startswith(f"Thanks, {saved}.")        # a wrong read is visible at once
+
+
+@pytest.mark.parametrize("answer", ["hello", "yes", "ok", "123", "x"])
+def test_something_that_is_not_a_name_is_asked_again(env, answer):
+    say(env, NEW_PLUMBER, "join", answer)
+    assert stage(NEW_PLUMBER) == "ob_name"
+    assert "I didn't catch your name" in env.wa_text_to(NEW_PLUMBER)[-1]
+    say(env, NEW_PLUMBER, "Sipho")
+    assert stage(NEW_PLUMBER) == "ob_experience"
+
+
+def test_the_saved_plumber_has_the_name_they_gave(env):
+    say(env, NEW_PLUMBER, "join", "my name is Lerato", "5 years", "no", "1, 2", "Randburg", "1", "YES")
+    saved = env.store.find_plumber_by_whatsapp(NEW_PLUMBER)
+    assert saved["first_name"] == "Lerato"
+    assert any("Lerato" in t and "WAITING FOR APPROVAL" in t for t in env.tg_texts())
