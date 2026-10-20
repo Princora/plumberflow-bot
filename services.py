@@ -42,6 +42,16 @@ class Services:
     founder_user_id: int
 
 
+def _build_interpreter():
+    """Haiku reads the replies the strict parsers cannot. Without a key, strict parsing only."""
+    key = env("ANTHROPIC_API_KEY")
+    if not key:
+        return None
+    from anthropic import Anthropic
+    from verification.interpret import ClaudeReplyInterpreter
+    return ClaudeReplyInterpreter(Anthropic(api_key=key, timeout=8.0, max_retries=1))
+
+
 def build_services() -> Services:
     store = AppStore(require("DATABASE_URL"))
     wa = WhatsAppCloud(require("WA_TOKEN", "WHATSAPP_TOKEN"),
@@ -49,6 +59,6 @@ def build_services() -> Services:
     tg = TelegramClient(require("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN"),
                         require("FOUNDER_CHAT_ID", "TELEGRAM_CHAT_ID"))
     messenger = CloudMessenger(wa, tg, fallback_template=env("WA_FALLBACK_TEMPLATE"))
-    ver = VerificationService(store, messenger)
+    ver = VerificationService(store, messenger, interpreter=_build_interpreter())
     disp = DispatchService(store, ver, messenger, tg)
     return Services(store, wa, tg, messenger, ver, disp, int(require("FOUNDER_USER_ID")))

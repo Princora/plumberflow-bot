@@ -22,12 +22,15 @@ Outbound text only ever comes from templates.py.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+import re
 from typing import Callable
 from zoneinfo import ZoneInfo
 
 from . import templates as T
+from .interpret import ReplyInterpreter
 from .parsing import (
-    is_wrong, parse_a9_reply, parse_amount_cents, parse_choice, parse_intent,
+    classify_agreement, is_bare_amount, is_clean_done_message, parse_a9_reply,
+    parse_amount_cents, parse_choice, parse_intent,
 )
 from .resolution import A7_AFTER_DAYS, Outcome, resolve
 from .store import Messenger, OPEN_STATUSES, Store
@@ -50,6 +53,10 @@ UNCLAIMED_STATUSES = ("accepted", "awaiting_customer", "unresolved")
 
 HOLD_UNRESOLVED = "unresolved_jobs"
 HOLD_UNPAID = "unpaid_invoice"
+
+
+# Worth asking the model about only when the message could hold an amount at all.
+_MAY_CONTAIN_AMOUNT = re.compile(r"\d|thousand|hundred|grand|\bk\b", re.I)
 
 
 def _settleable(job: dict) -> bool:
@@ -90,6 +97,7 @@ class VerificationService:
         credit_link: str | None = None,       # None disables the job-4 credit transition
         credit_amount_cents: int = 66_000,    # R660 = 3 jobs
         credit_jobs: int = 3,
+        interpreter: ReplyInterpreter | None = None,  # None: strict parsing only
     ) -> None:
         self.store = store
         self.msg = messenger
@@ -98,6 +106,7 @@ class VerificationService:
         self.credit_link = credit_link
         self.credit_amount_cents = credit_amount_cents
         self.credit_jobs = credit_jobs
+        self.interpreter = interpreter
 
     def now(self) -> datetime:
         return self._clock()
@@ -224,6 +233,35 @@ class VerificationService:
 
     # ───────────────────────── Plumber inbound ─────────────────────────
 
+    # ───────────────────────── Reading replies ─────────────────────────
+
+    def _agreement(self, text: str, question: str, *, bare_no: str = "unclear") -> str:
+        """'agrees' | 'disputes' | 'unclear'. Strict rules first; the model only breaks ties."""
+        verdict = classify_agreement(text, bare_no=bare_no)
+        if verdict == "unclear" and self.interpreter:
+            verdict = self.interpreter.agreement(text, question) or "unclear"
+        return verdict
+
+    def _extract_value(self, text: str) -> tuple[int, bool] | None:
+        """(cents, clean) or None. clean means the amount was typed plainly and can be
+        logged as is. Anything the model had to interpret, or that came with other words
+        or numbers, is not clean and gets confirmed with the plumber first."""
+        cents = parse_amount_cents(text)
+        if cents is not None:
+            return cents, is_clean_done_message(text) or is_bare_amount(text)
+        if self.interpreter and _MAY_CONTAIN_AMOUNT.search(text):
+            cents = self.interpreter.job_value(text)
+            if cents is not None:
+                return cents, False
+        return None
+
+    def _propose_value(self, plumber: dict, job: dict, cents: int, *, tries: int = 0) -> None:
+        # Pending cents ride in `options` so this needs no schema change.
+        self.store.set_plumber_state(
+            plumber["id"], "confirm_value", job_id=job["id"], options=[str(cents)], tries=tries)
+        self.msg.send_plumber(plumber, T.a4_confirm_value(cents))
+
+
     def on_plumber_message(self, plumber_id: str, text: str) -> bool:
         plumber = self.store.get_plumber(plumber_id)
         if not plumber:
@@ -243,7 +281,7 @@ class VerificationService:
             self.msg.send_plumber(plumber, T.no_open_jobs())
             return True
         if len(jobs) == 1:
-            self._begin(plumber, jobs[0], intent, amount=parse_amount_cents(text) if intent == "done" else None)
+            self._begin(plumber, jobs[0], intent, value=self._extract_value(text) if intent == "done" else None)
             return True
 
         jobs = jobs[-6:]
@@ -255,10 +293,13 @@ class VerificationService:
         ))
         return True
 
-    def _begin(self, plumber: dict, job: dict, intent: str, amount: int | None = None) -> None:
+    def _begin(self, plumber: dict, job: dict, intent: str,
+               value: tuple[int, bool] | None = None) -> None:
         if intent == "done":
-            if amount:
-                self._record_done(plumber, job, amount)
+            if value and value[1]:
+                self._record_done(plumber, job, value[0])
+            elif value:
+                self._propose_value(plumber, job, value[0])
             else:
                 self.store.set_plumber_state(plumber["id"], "awaiting_value", job_id=job["id"])
                 self.msg.send_plumber(plumber, T.a4_ask_value())
@@ -302,8 +343,8 @@ class VerificationService:
             return True
 
         if step == "awaiting_value":
-            cents = parse_amount_cents(text)
-            if cents is None:
+            value = self._extract_value(text)
+            if value is None:
                 tries = state.get("tries", 0) + 1
                 if tries >= 2:
                     self.store.clear_plumber_state(pid)
@@ -311,8 +352,15 @@ class VerificationService:
                 self.store.set_plumber_state(pid, "awaiting_value", job_id=state["job_id"], tries=tries)
                 self.msg.send_plumber(plumber, T.a4_value_retry())
                 return True
-            self._record_done(plumber, self.store.get_job(state["job_id"]), cents)
+            job = self.store.get_job(state["job_id"])
+            if value[1]:
+                self._record_done(plumber, job, value[0])
+            else:
+                self._propose_value(plumber, job, value[0])
             return True
+
+        if step == "confirm_value":
+            return self._handle_value_confirmation(plumber, state, text)
 
         if step == "awaiting_no_go_reason":
             self.store.update_job(state["job_id"], no_go_reason=text.strip()[:300])
@@ -321,24 +369,79 @@ class VerificationService:
             return True
 
         if step == "a7_reply":
-            self.store.clear_plumber_state(pid)
-            if not is_wrong(text):
-                return False
-            job = self.store.get_job(state["job_id"])
-            self.store.update_job(job["id"], status="disputed", charged_at=None, resolved_at=None)
-            self._flag(self.store.get_job(job["id"]), "charge_contested_by_plumber")
-            self.store.log_event("a7_contested", job_id=job["id"], plumber_id=pid)
-            self.msg.send_plumber(plumber, T.a7_pulled())
-            self.msg.notify_founder(
-                f"CONTESTED CHARGE: {plumber['first_name']} says {self._short(job)} is wrong "
-                f"after the customer confirmed it. Job {job['id']}."
-            )
-            return True
+            return self._handle_a7_reply(plumber, state, text)
 
         if step == "a9":
             return self._handle_a9_reply(plumber, state, text)
 
         return False
+
+    def _handle_value_confirmation(self, plumber: dict, state: dict, text: str) -> bool:
+        pid = plumber["id"]
+        job = self.store.get_job(state["job_id"])
+        pending = int(state["options"][0])
+
+        typed = parse_amount_cents(text)
+        if typed is not None and typed != pending:
+            # A different amount: a bare number is an explicit correction; anything
+            # wordier is proposed back so a misread is never logged silently.
+            if is_bare_amount(text):
+                self._record_done(plumber, job, typed)
+            else:
+                self._propose_value(plumber, job, typed, tries=state.get("tries", 0))
+            return True
+
+        verdict = self._agreement(
+            text, f"Is {T.rand(pending)} the amount you charged for the job?", bare_no="disputes")
+        if verdict == "agrees":
+            self._record_done(plumber, job, pending)
+        elif verdict == "disputes":
+            self.store.set_plumber_state(pid, "awaiting_value", job_id=job["id"])
+            self.msg.send_plumber(plumber, T.a4_ask_value())
+        else:
+            tries = state.get("tries", 0) + 1
+            if tries >= 2:
+                self.store.clear_plumber_state(pid)
+                return False   # nothing logged; the router hands it to the founder
+            self._propose_value(plumber, job, pending, tries=tries)
+        return True
+
+    def _handle_a7_reply(self, plumber: dict, state: dict, text: str) -> bool:
+        pid = plumber["id"]
+        job = self.store.get_job(state["job_id"])
+        verdict = self._agreement(
+            text, "The customer confirmed the job and a fee is going on this week's invoice. "
+                  "Is that right, or is it wrong?")
+
+        if verdict == "unclear":
+            tries = state.get("tries", 0) + 1
+            if tries >= 2:
+                # Silence already means the charge stands, so an answer nobody can read
+                # changes nothing. Put it in front of a person.
+                self.store.clear_plumber_state(pid)
+                self.msg.notify_founder(
+                    f"UNCLEAR REPLY ON CHARGE: {plumber['first_name']} on {self._short(job)}: "
+                    f"{text.strip()[:200]!r}. Charge left as is. Job {job['id']}."
+                )
+                return True
+            self.store.set_plumber_state(pid, "a7_reply", job_id=job["id"], tries=tries)
+            self.msg.send_plumber(plumber, T.a7_clarify())
+            return True
+
+        self.store.clear_plumber_state(pid)
+        if verdict == "agrees":
+            self.store.log_event("a7_confirmed", job_id=job["id"], plumber_id=pid)
+            return True
+
+        self.store.update_job(job["id"], status="disputed", charged_at=None, resolved_at=None)
+        self._flag(self.store.get_job(job["id"]), "charge_contested_by_plumber")
+        self.store.log_event("a7_contested", job_id=job["id"], plumber_id=pid)
+        self.msg.send_plumber(plumber, T.a7_pulled())
+        self.msg.notify_founder(
+            f"CONTESTED CHARGE: {plumber['first_name']} says {self._short(job)} is wrong "
+            f"after the customer confirmed it. Job {job['id']}."
+        )
+        return True
 
     def _handle_a9_reply(self, plumber: dict, state: dict, text: str) -> bool:
         items = parse_a9_reply(text)
