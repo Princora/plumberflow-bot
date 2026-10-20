@@ -117,7 +117,7 @@ fly secrets set DATABASE_URL="<pooled-url>" WA_TOKEN="<token>" WA_PHONE_NUMBER_I
 | `PAYSHAP_NUMBER` | Needed to sell credits by PayShap: the cellphone number plumbers pay, e.g. `0821234567`. Shown with their order and reference |
 | `PAYSHAP_NAME` | Optional. The name that shows when they pay that number, so they know it is right |
 | `CREDIT_PAYMENT_DETAILS` | Optional. Used only when `PAYSHAP_NUMBER` is not set. Your bank details as text; use `\|` for a new line, e.g. `FNB \| Princora \| Acc 62... \| Branch 250655`. Sent to a plumber with their order |
-| `TRIAL_LEADS` | Optional, default `5`. Trial leads given when you `/approve` a plumber who has never had any |
+| `TRIAL_LEADS` | Optional, default `2`. Trial leads given when you `/approve` a plumber who has never had any |
 | `WA_FALLBACK_TEMPLATE` | Optional. Approved template name used when WhatsApp refuses free text (see `WHATSAPP_TEMPLATES.md`) |
 
 The older names `WHATSAPP_TOKEN`, `PHONE_NUMBER_ID`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`

@@ -805,9 +805,9 @@ def test_approving_a_new_plumber_gives_five_trial_leads_and_says_so(env):
     lerato = join(env, areas="Randburg")
     assert env.store.plumbers[lerato["id"]].get("trial_stage") is None      # none until approved
     env.founder_says(f"/approve {str(lerato['id'])[:8]}")
-    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 5
-    assert any("You have 5 trial leads" in t and "no fee" in t for t in env.wa_text_to(NEW_PLUMBER))
-    assert "5 trial leads" in env.tg_texts()[-1]
+    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 2
+    assert any("You have 2 trial leads" in t and "no fee" in t for t in env.wa_text_to(NEW_PLUMBER))
+    assert "2 trial leads" in env.tg_texts()[-1]
 
 
 def test_approving_never_resets_a_plumbers_trial_leads(env):
@@ -846,14 +846,14 @@ def test_a_trial_lead_is_free_from_offer_to_job(env):
     env.founder_tap(f"o:L-0001:{p8(lerato)}")
     offer = env.wa_text_to(NEW_PLUMBER)[-1]
     assert "Trial lead · no fee" in offer and "R220" not in offer
-    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 5         # offered, not yet used
+    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 2         # offered, not yet used
 
     env.post_wa(NEW_PLUMBER, text="take")
     job = env.store.get_job_by_lead("L-0001")
     assert job["fee_cents"] == 0 and "trial_lead" in job["flags"]
-    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 4          # used when they took it
+    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 1          # used when they took it
     took = env.wa_text_to(NEW_PLUMBER)[-1]
-    assert "You've got it." in took and "trial lead, so no fee" in took and "4 trial leads left" in took
+    assert "You've got it." in took and "trial lead, so no fee" in took and "1 trial lead left" in took
 
 
 def test_a_plumber_without_trial_leads_pays_with_a_credit(env):

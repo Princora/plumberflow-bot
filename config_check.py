@@ -111,7 +111,7 @@ _SETTINGS = [
     (("TELEGRAM_WEBHOOK_SECRET",), _webhook_secret, False),
     (("VERIFY_TOKEN",), _plain_secret, False),
     (("WA_FALLBACK_TEMPLATE",), _template_name, False),
-    (("TRIAL_LEADS",), _digits("how many free jobs a new plumber gets", "5"), False),
+    (("TRIAL_LEADS",), _digits("how many free jobs a new plumber gets", "2"), False),
 ]
 
 

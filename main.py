@@ -29,9 +29,9 @@ TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 ADMIN_PHONE             = os.environ.get("ADMIN_PHONE", "")     # your WhatsApp number (no +)
 ANTHROPIC_API_KEY       = os.environ.get("ANTHROPIC_API_KEY")   # for the Haiku 4.5 NLU layer
 try:
-    TRIAL_LEADS = int(os.environ.get("TRIAL_LEADS", "5"))  # free jobs given when you /approve a new plumber
+    TRIAL_LEADS = int(os.environ.get("TRIAL_LEADS", "2"))  # free jobs given when you /approve a new plumber
 except ValueError:
-    TRIAL_LEADS = 5   # config_check reports the bad value by name when the bot starts
+    TRIAL_LEADS = 2   # config_check reports the bad value by name when the bot starts
 
 logger = logging.getLogger("plumberflow")
 logging.basicConfig(level=logging.INFO)
