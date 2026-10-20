@@ -58,8 +58,8 @@ more, `UPDATE plumbers SET trial_stage = 3 WHERE id = '...'`. To take them away,
 Lead credits: once the trial leads are used, a lead costs one credit. **Apply 005 before deploying
 this version** (it adds `plumbers.credits` and the `credit_orders` table; the old bot ignores both).
 Packs are 2 credits (R440), 5 credits (R1,045, 5% off) and 10 credits (R1,980, 10% off); one credit is
-R220. A plumber sends *BUY*, picks a pack, and gets your bank details with an order reference
-(`CREDIT_PAYMENT_DETAILS`). You get the order in Telegram; when the EFT arrives, `/credit C-0001` adds
+R220. A plumber sends *BUY*, picks a pack, and gets your PayShap number (`PAYSHAP_NUMBER`) with an
+order reference. You get the order in Telegram; when the PayShap payment arrives, `/credit C-0001` adds
 the credits and WhatsApps them. `/orders` lists unpaid orders, `/credit C-0001 cancel` drops one,
 `/grant <id> <n>` adds credits by hand. A trial lead is used before a credit. A plumber with neither
 is not suggested for leads and cannot take one until they buy. A job that ends with no charge (no go,
@@ -114,7 +114,9 @@ fly secrets set DATABASE_URL="<pooled-url>" WA_TOKEN="<token>" WA_PHONE_NUMBER_I
 | `TELEGRAM_WEBHOOK_SECRET` | Random string; Telegram sends it back on every call (step 6) |
 | `ANTHROPIC_API_KEY` | Claude Haiku, for understanding messages |
 | `ADMIN_PHONE` | Optional. Your WhatsApp number, for STATS, PLUMBERS and BROADCAST |
-| `CREDIT_PAYMENT_DETAILS` | Optional but needed to sell credits. Your bank details as text; use `\|` for a new line, e.g. `FNB \| Princora \| Acc 62... \| Branch 250655`. Sent to a plumber with their order |
+| `PAYSHAP_NUMBER` | Needed to sell credits by PayShap: the cellphone number plumbers pay, e.g. `0821234567`. Shown with their order and reference |
+| `PAYSHAP_NAME` | Optional. The name that shows when they pay that number, so they know it is right |
+| `CREDIT_PAYMENT_DETAILS` | Optional. Used only when `PAYSHAP_NUMBER` is not set. Your bank details as text; use `\|` for a new line, e.g. `FNB \| Princora \| Acc 62... \| Branch 250655`. Sent to a plumber with their order |
 | `TRIAL_LEADS` | Optional, default `5`. Trial leads given when you `/approve` a plumber who has never had any |
 | `WA_FALLBACK_TEMPLATE` | Optional. Approved template name used when WhatsApp refuses free text (see `WHATSAPP_TEMPLATES.md`) |
 

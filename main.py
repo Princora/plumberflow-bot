@@ -318,7 +318,7 @@ FOUNDER_HELP = (
     "/pending — new plumbers waiting for approval\n"
     "/approve <id> — let a new plumber start getting leads\n"
     "/orders — credit orders waiting for payment\n"
-    "/credit <ref> — EFT received, add the credits (or: /credit <ref> cancel)\n"
+    "/credit <ref> — payment received, add the credits (or: /credit <ref> cancel)\n"
     "/grant <id> <n> — give a plumber n credits by hand\n\n"
     "<id> is the first few characters shown in the list."
 )
@@ -444,7 +444,7 @@ async def handle_founder_command(update: dict):
             lines.append(f"{o['ref']} · {who.get('first_name') or '?'} · {o['credits']} credits · "
                          f"{credit_rand(o['price_cents'])}")
         await notify_founder("Credit orders waiting for payment\n\n" + "\n".join(lines)
-                             + "\n\nWhen the EFT is in: /credit <ref>")
+                             + "\n\nWhen the payment is in: /credit <ref>")
 
     elif cmd == "/credit":
         ref = args[0].upper() if args else ""
@@ -1148,14 +1148,22 @@ def _buy_menu(plumber: dict) -> str:
     )
 
 def _payment_instructions(order: dict) -> str:
+    amount = credit_rand(order["price_cents"])
+    number = (os.environ.get("PAYSHAP_NUMBER") or "").strip()
+    holder = (os.environ.get("PAYSHAP_NAME") or "").strip()
     details = (os.environ.get("CREDIT_PAYMENT_DETAILS") or "").replace("|", "\n").strip()
-    pay = (f"Pay by EFT to:\n{details}\n\n" if details
-           else "I'll send you the bank details shortly.\n\n")
+    if number:
+        pay = (f"Pay with *PayShap*:\n"
+               f"Send {amount} to {number}" + (f" ({holder})" if holder else "") + "\n"
+               f"Use *{order['ref']}* as the payment reference.\n\n")
+    elif details:
+        pay = f"Pay by EFT to:\n{details}\n\nUse *{order['ref']}* as the payment reference.\n\n"
+    else:
+        pay = "I'll send you the payment details shortly.\n\n"
     return (
         f"🧾 *Order {order['ref']}*\n"
-        f"{order['credits']} credits · {credit_rand(order['price_cents'])}\n\n"
+        f"{order['credits']} credits · {amount}\n\n"
         f"{pay}"
-        f"Use *{order['ref']}* as the payment reference. "
         "Your credits are added as soon as the payment is confirmed, and I'll message you here."
     )
 
@@ -1189,7 +1197,7 @@ async def handle_plumber_command_state(sender: str, text: str):
             await notify_founder(
                 f"Credit order {order['ref']}: {plumber.get('first_name') or '?'} "
                 f"(+{normalize_phone(plumber.get('whatsapp'))}) wants {n} credits, {credit_rand(price)}.\n"
-                f"Confirm once the EFT is in: /credit {order['ref']}")
+                f"Confirm once the payment is in: /credit {order['ref']}")
         await send(sender, _payment_instructions(order))
         return
 
