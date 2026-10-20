@@ -5,8 +5,10 @@ voice from first offer to invoice."""
 from verification import templates as VT
 
 
-def offer_to_plumber(ref: str, suburb: str, job_short: str, n_viewing: int, fee_cents: int) -> str:
-    return f"{VT.lead_arrival(suburb, job_short, n_viewing, fee_cents)}\n\nReply take to claim it · {ref}"
+def offer_to_plumber(ref: str, suburb: str, job_short: str, n_viewing: int, fee_cents: int,
+                     credits_left: int | None = None) -> str:
+    return (f"{VT.lead_arrival(suburb, job_short, n_viewing, fee_cents, credits_left)}"
+            f"\n\nReply take to claim it · {ref}")
 
 
 def which_offer(options: list[tuple[str, str]]) -> str:

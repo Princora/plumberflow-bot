@@ -9,7 +9,7 @@ services.py          Builds the stores, clients and services from environment va
 app_store.py         Plumber registry and admin queries on top of the packages
 dispatch/            Telegram buttons, WhatsApp offer, first "take" wins
 verification/        Done / no go, customer checks, invoices, reminders
-migrations/          001 job lifecycle, 002 dispatch, 003 self-pause, 004 pending approval
+migrations/          001 job lifecycle, 002 dispatch, 003 self-pause, 004 pending approval, 005 lead credits
 tests/               pytest suite
 WHATSAPP_TEMPLATES.md   Templates to submit to Meta
 ```
@@ -39,6 +39,7 @@ Migrations are applied with the **direct** connection string (host without `-poo
 psql "$NEON_DIRECT_URL" -f migrations/001_job_lifecycle.sql
 psql "$NEON_DIRECT_URL" -f migrations/002_dispatch.sql
 psql "$NEON_DIRECT_URL" -f migrations/004_pending_approval.sql
+psql "$NEON_DIRECT_URL" -f migrations/005_credits.sql
 ```
 
 001 and 002 are already applied on the PlumberFlow project. 004 **must be applied before you deploy
@@ -53,6 +54,17 @@ count is above 0 has a fee of R0, is flagged `trial_lead`, and uses one. The off
 "Trial lead · no fee" for that plumber, and only the plumber who takes the lead uses one. Free jobs
 are never invoiced and do not count towards the "three paid jobs" credit offer. To give someone
 more, `UPDATE plumbers SET trial_stage = 3 WHERE id = '...'`. To take them away, set it to 0.
+
+Lead credits: once the trial leads are used, a lead costs one credit. **Apply 005 before deploying
+this version** (it adds `plumbers.credits` and the `credit_orders` table; the old bot ignores both).
+Packs are 2 credits (R440), 5 credits (R1,045, 5% off) and 10 credits (R1,980, 10% off); one credit is
+R220. A plumber sends *BUY*, picks a pack, and gets your bank details with an order reference
+(`CREDIT_PAYMENT_DETAILS`). You get the order in Telegram; when the EFT arrives, `/credit C-0001` adds
+the credits and WhatsApps them. `/orders` lists unpaid orders, `/credit C-0001 cancel` drops one,
+`/grant <id> <n>` adds credits by hand. A trial lead is used before a credit. A plumber with neither
+is not suggested for leads and cannot take one until they buy. A job that ends with no charge (no go,
+or a dispute settled as no charge) returns its credit. Credits never expire. Weekly invoices are no
+longer created for new jobs; invoices already sent stay valid and are chased as before.
 
 New plumbers wait for the founder. `/pending` in Telegram lists them, `/approve <id>` lets one start
 getting leads and WhatsApps them. Plumbers already in the table are not affected.
@@ -102,6 +114,7 @@ fly secrets set DATABASE_URL="<pooled-url>" WA_TOKEN="<token>" WA_PHONE_NUMBER_I
 | `TELEGRAM_WEBHOOK_SECRET` | Random string; Telegram sends it back on every call (step 6) |
 | `ANTHROPIC_API_KEY` | Claude Haiku, for understanding messages |
 | `ADMIN_PHONE` | Optional. Your WhatsApp number, for STATS, PLUMBERS and BROADCAST |
+| `CREDIT_PAYMENT_DETAILS` | Optional but needed to sell credits. Your bank details as text; use `\|` for a new line, e.g. `FNB \| Princora \| Acc 62... \| Branch 250655`. Sent to a plumber with their order |
 | `TRIAL_LEADS` | Optional, default `5`. Trial leads given when you `/approve` a plumber who has never had any |
 | `WA_FALLBACK_TEMPLATE` | Optional. Approved template name used when WhatsApp refuses free text (see `WHATSAPP_TEMPLATES.md`) |
 

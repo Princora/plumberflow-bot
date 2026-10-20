@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 OPEN_STATUSES = ("accepted", "awaiting_customer")
@@ -76,6 +77,7 @@ class InMemoryStore:
         self.holds: set[tuple[str, str]] = set()
         self.invoices: dict[str, dict] = {}
         self.events: list[dict] = []
+        self.credit_orders: dict[str, dict] = {}
 
     def add_plumber(self, first_name: str, *, active: bool = True, **extra: Any) -> dict:
         p = {"id": str(uuid.uuid4()), "first_name": first_name, "active": active, **extra}
@@ -147,6 +149,55 @@ class InMemoryStore:
         if p.get("trial_stage") is None:
             p["trial_stage"] = n
         return p["trial_stage"]
+
+    # lead credits
+    def credit_balance(self, plumber_id):
+        return (self.plumbers.get(plumber_id) or {}).get("credits") or 0
+
+    def use_credit(self, plumber_id):
+        p = self.plumbers.get(plumber_id)
+        if not p or (p.get("credits") or 0) <= 0:
+            return None
+        p["credits"] -= 1
+        return p["credits"]
+
+    def add_credits(self, plumber_id, n):
+        p = self.plumbers.get(plumber_id)
+        if not p or n < 0:
+            return None
+        p["credits"] = (p.get("credits") or 0) + n
+        return p["credits"]
+
+    def create_credit_order(self, plumber_id, credits, price_cents):
+        ref = f"C-{len(self.credit_orders) + 1:04d}"
+        o = {"ref": ref, "plumber_id": plumber_id, "credits": credits, "price_cents": price_cents,
+             "status": "pending", "created_at": datetime.now(timezone.utc), "paid_at": None}
+        self.credit_orders[ref] = o
+        return copy.deepcopy(o)
+
+    def get_credit_order(self, ref):
+        o = self.credit_orders.get(ref.upper())
+        return copy.deepcopy(o) if o else None
+
+    def list_credit_orders(self, *, status=None, plumber_id=None):
+        return [copy.deepcopy(o) for o in self.credit_orders.values()
+                if (not status or o["status"] == status) and (not plumber_id or o["plumber_id"] == plumber_id)]
+
+    def cancel_credit_order(self, ref):
+        o = self.credit_orders.get(ref.upper())
+        if not o or o["status"] != "pending":
+            return False
+        o["status"] = "cancelled"
+        return True
+
+    def settle_credit_order(self, ref):
+        o = self.credit_orders.get(ref.upper())
+        if not o or o["status"] != "pending" or o["plumber_id"] not in self.plumbers:
+            return None
+        o["status"] = "paid"
+        o["paid_at"] = datetime.now(timezone.utc)
+        balance = self.add_credits(o["plumber_id"], o["credits"])
+        return {"plumber_id": o["plumber_id"], "added": o["credits"], "balance": balance}
 
     # state
     def get_plumber_state(self, plumber_id):

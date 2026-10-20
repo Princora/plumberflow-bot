@@ -45,9 +45,9 @@ def d(store):
     msg, tg, clock = FakeMessenger(), FakeTelegram(), Clock(MON)
     ver = VerificationService(store, msg, clock=clock)
     svc = DispatchService(store, ver, msg, tg)
-    sipho = store.add_plumber("Sipho", whatsapp="+27821110001", areas=["Fourways", "Randburg"])
-    thabo = store.add_plumber("Thabo", whatsapp="0821110002", areas=["Fourways"])
-    kelo = store.add_plumber("Kelo", whatsapp="+27821110003", areas=["Mondeor"])
+    sipho = store.add_plumber("Sipho", whatsapp="+27821110001", areas=["Fourways", "Randburg"], credits=10)
+    thabo = store.add_plumber("Thabo", whatsapp="0821110002", areas=["Fourways"], credits=10)
+    kelo = store.add_plumber("Kelo", whatsapp="+27821110003", areas=["Mondeor"], credits=10)
     return store, msg, tg, clock, ver, svc, sipho, thabo, kelo
 
 
@@ -95,7 +95,7 @@ def test_offer_sends_suburb_and_problem_only(d):
     l = lead(svc)
     svc.on_telegram_callback(tg.find(l["telegram_message_id"], "Offer to Sipho"))
     [text] = texts(msg, "Sipho")
-    assert "Fourways" in text and "Geyser leaking" in text and "R220" in text
+    assert "Fourways" in text and "Geyser leaking" in text and "Uses 1 credit" in text
     assert "Sarah" not in text and "0829998888" not in text and "Cedar" not in text
     assert l["ref"] in text and "take" in text
     assert store.get_lead(l["ref"])["status"] == "offered"
@@ -145,7 +145,7 @@ def test_take_creates_job_sends_details_and_closes_losers(d):
     assert svc.on_whatsapp_text("27821110001", "take") is True
     job = store.get_job_by_lead(l["ref"])
     assert job and job["plumber_id"] == sipho["id"] and job["customer_phone"] == "0829998888"
-    assert job["status"] == "accepted" and job["fee_cents"] == 22000
+    assert job["status"] == "accepted" and job["fee_cents"] == 0 and "credit_lead" in job["flags"]
     confirm = texts(msg, "Sipho")[-1]
     assert "Sarah" in confirm and "12 Cedar Rd" in confirm and "done" in confirm
     assert "taken by another" in texts(msg, "Thabo")[-1]

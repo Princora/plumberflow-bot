@@ -149,8 +149,8 @@ class Env:
     def founder_says(self, text):
         return self.post_tg({"message": {"from": {"id": FOUNDER}, "chat": {"id": 111}, "text": text}})
 
-    def add_plumber(self, name="Sipho", phone=PLUMBER_PHONE, areas=("randburg",)):
-        return self.store.add_plumber(name, whatsapp=phone, areas=list(areas), services=["Burst pipe"])
+    def add_plumber(self, name="Sipho", phone=PLUMBER_PHONE, areas=("randburg",), credits=10):
+        return self.store.add_plumber(name, whatsapp=phone, areas=list(areas), services=["Burst pipe"], credits=credits)
 
     def run_lead_flow(self, phone=CUSTOMER, suburb="Randburg"):
         for text in ("plumber", "burst pipe", "now", suburb, "skip"):
@@ -199,7 +199,7 @@ def test_founder_offer_then_plumber_take_creates_job(env):
     env.run_lead_flow()
     env.founder_tap(f"o:L-0001:{p8(sipho)}")
     offers = env.wa_text_to(PLUMBER_PHONE)
-    assert offers and "New job — Randburg" in offers[-1] and "R220" in offers[-1]
+    assert offers and "New job — Randburg" in offers[-1] and "Uses 1 credit" in offers[-1]
 
     env.post_wa(PLUMBER_PHONE, text="take")
     job = env.store.get_job_by_lead("L-0001")
@@ -856,15 +856,17 @@ def test_a_trial_lead_is_free_from_offer_to_job(env):
     assert "You've got it." in took and "trial lead, so no fee" in took and "4 trial leads left" in took
 
 
-def test_a_plumber_without_trial_leads_still_sees_the_normal_fee(env):
-    sipho = env.add_plumber()                                            # no trial_stage
+def test_a_plumber_without_trial_leads_pays_with_a_credit(env):
+    sipho = env.add_plumber()                                            # no trial_stage, 10 credits
     env.run_lead_flow(suburb="Randburg")
     env.founder_tap(f"o:L-0001:{p8(sipho)}")
     offer = env.wa_text_to(PLUMBER_PHONE)[-1]
-    assert "R220 due after the job is done" in offer and "Trial lead" not in offer
+    assert "Uses 1 credit · you have 10" in offer and "Trial lead" not in offer
     env.post_wa(PLUMBER_PHONE, text="take")
-    assert env.store.get_job_by_lead("L-0001")["fee_cents"] == 22000
-    assert "trial lead" not in env.wa_text_to(PLUMBER_PHONE)[-1]
+    job = env.store.get_job_by_lead("L-0001")
+    assert job["fee_cents"] == 0 and "credit_lead" in job["flags"]
+    assert env.store.credit_balance(sipho["id"]) == 9
+    assert "That used 1 credit. 9 credits left." in env.wa_text_to(PLUMBER_PHONE)[-1]
 
 
 def test_only_the_plumber_who_takes_it_uses_a_trial_lead(env):

@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from config_check import ConfigError
+from credits import CREDIT_PRICE_CENTS, PACK_SIZES, pack_line, pack_price_cents, parse_pack, rand as credit_rand
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
 from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
@@ -314,7 +315,10 @@ FOUNDER_HELP = (
     "/disputes — jobs that need your decision\n"
     "/resolve <id> charge|no_charge [note] — settle a dispute\n"
     "/pending — new plumbers waiting for approval\n"
-    "/approve <id> — let a new plumber start getting leads\n\n"
+    "/approve <id> — let a new plumber start getting leads\n"
+    "/orders — credit orders waiting for payment\n"
+    "/credit <ref> — EFT received, add the credits (or: /credit <ref> cancel)\n"
+    "/grant <id> <n> — give a plumber n credits by hand\n\n"
     "<id> is the first few characters shown in the list."
 )
 
@@ -427,6 +431,62 @@ async def handle_founder_command(update: dict):
             f"Approved {name} ({str(plumber['id'])[:8]})."
             + (f" {trial} trial {'lead' if trial == 1 else 'leads'}." if trial > 0 else " No trial leads.")
             + ("" if sent else " Could not WhatsApp them. Tell them yourself."))
+
+    elif cmd == "/orders":
+        rows = await db(S.store.list_credit_orders, status="pending")
+        if not rows:
+            await notify_founder("No credit orders waiting for payment.")
+            return
+        lines = []
+        for o in rows:
+            who = await db(S.store.get_plumber, o["plumber_id"]) or {}
+            lines.append(f"{o['ref']} · {who.get('first_name') or '?'} · {o['credits']} credits · "
+                         f"{credit_rand(o['price_cents'])}")
+        await notify_founder("Credit orders waiting for payment\n\n" + "\n".join(lines)
+                             + "\n\nWhen the EFT is in: /credit <ref>")
+
+    elif cmd == "/credit":
+        ref = args[0].upper() if args else ""
+        order = await db(S.store.get_credit_order, ref) if ref else None
+        if not order:
+            await notify_founder("Usage: /credit <ref>. No order with that ref. See /orders.")
+            return
+        if len(args) > 1 and args[1].lower() == "cancel":
+            done = await db(S.store.cancel_credit_order, ref)
+            await notify_founder(f"Cancelled {ref}." if done else f"{ref} is {order['status']}, so it can't be cancelled.")
+            return
+        settled = await db(S.store.settle_credit_order, ref)
+        if not settled:
+            await notify_founder(f"{ref} is already {order['status']}. Nothing added.")
+            return
+        plumber = await db(S.store.get_plumber, settled["plumber_id"]) or {}
+        name = plumber.get("first_name") or "that plumber"
+        sent = True
+        try:
+            await send(normalize_phone(plumber.get("whatsapp")), (
+                f"✅ Payment received. {settled['added']} credits added.\n\n"
+                f"You now have {settled['balance']} {'credit' if settled['balance'] == 1 else 'credits'}. "
+                "Each lead you take uses one."))
+        except Exception:
+            logger.exception("credit confirmation message failed")
+            sent = False
+        await notify_founder(f"{ref}: added {settled['added']} credits to {name}. Balance {settled['balance']}."
+                             + ("" if sent else " Could not WhatsApp them. Tell them yourself."))
+
+    elif cmd == "/grant":
+        plumber = await db(S.store.find_plumber_by_prefix, args[0]) if args else None
+        n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
+        if not plumber or not 1 <= n <= 100:
+            await notify_founder("Usage: /grant <id> <n> (1 to 100). No single plumber matches that id, or n is wrong.")
+            return
+        balance = await db(S.store.add_credits, plumber["id"], n)
+        name = plumber.get("first_name") or "That plumber"
+        try:
+            await send(normalize_phone(plumber.get("whatsapp")),
+                       f"✅ {n} credits added to your account. You now have {balance}.")
+        except Exception:
+            logger.exception("grant message failed")
+        await notify_founder(f"Gave {name} {n} credits. Balance {balance}.")
 
     else:
         await notify_founder(FOUNDER_HELP)
@@ -944,6 +1004,7 @@ async def try_plumber_command(sender: str, text_upper: str, plumber: dict) -> bo
         await send(sender, (
             "🔧 *PlumberFlow — Plumber Commands*\n\n"
             "• *STATUS* — your account & open jobs\n"
+            "• *BUY* — buy lead credits\n"
             "• *PAUSE* — stop receiving new leads\n"
             "• *RESUME* — start receiving leads again\n"
             "• *AREAS* — update the suburbs you cover\n"
@@ -970,6 +1031,7 @@ async def try_plumber_command(sender: str, text_upper: str, plumber: dict) -> bo
             f"Status: {status}\n"
             f"Open jobs: {open_jobs}\n"
             + (f"Trial leads left: {plumber['trial_stage']} (no fee)\n" if (plumber.get("trial_stage") or 0) > 0 else "")
+            + f"Credits: {plumber.get('credits') or 0}\n"
             + "\n"
             f"📍 Areas: {areas}\n"
             f"🛠 Services: {services}\n\n"
@@ -1005,6 +1067,11 @@ async def try_plumber_command(sender: str, text_upper: str, plumber: dict) -> bo
             ))
         return True
 
+    if text_upper in ("BUY", "CREDITS", "CREDIT", "TOP UP", "TOPUP", "BUY CREDITS"):
+        plumber_command_state[sender] = {"command": "buy_credits"}
+        await send(sender, _buy_menu(plumber))
+        return True
+
     if text_upper == "AREAS":
         current = ", ".join(a.title() for a in plumber.get("areas") or [])
         plumber_command_state[sender] = {"command": "update_areas"}
@@ -1036,6 +1103,30 @@ async def try_plumber_command(sender: str, text_upper: str, plumber: dict) -> bo
 
     return False
 
+def _buy_menu(plumber: dict) -> str:
+    have = plumber.get("credits") or 0
+    packs = "\n".join(f"• {pack_line(n)}" for n in PACK_SIZES)
+    return (
+        f"💳 *Lead credits*\n\n"
+        f"You have {have} {'credit' if have == 1 else 'credits'}. Each lead you take uses one "
+        f"({credit_rand(CREDIT_PRICE_CENTS)} each, less for bigger packs).\n\n"
+        f"{packs}\n\n"
+        f"Reply with how many you want: *{'*, *'.join(str(n) for n in PACK_SIZES)}*\n"
+        f"Or type *CANCEL*."
+    )
+
+def _payment_instructions(order: dict) -> str:
+    details = (os.environ.get("CREDIT_PAYMENT_DETAILS") or "").replace("|", "\n").strip()
+    pay = (f"Pay by EFT to:\n{details}\n\n" if details
+           else "I'll send you the bank details shortly.\n\n")
+    return (
+        f"🧾 *Order {order['ref']}*\n"
+        f"{order['credits']} credits · {credit_rand(order['price_cents'])}\n\n"
+        f"{pay}"
+        f"Use *{order['ref']}* as the payment reference. "
+        "Your credits are added as soon as the payment is confirmed, and I'll message you here."
+    )
+
 async def handle_plumber_command_state(sender: str, text: str):
     """Handle the second step of multi-step plumber commands."""
     state   = plumber_command_state[sender]
@@ -1049,6 +1140,25 @@ async def handle_plumber_command_state(sender: str, text: str):
     plumber = await get_plumber(sender)
     if not plumber:
         plumber_command_state.pop(sender, None)
+        return
+
+    if command == "buy_credits":
+        n = parse_pack(text)
+        if n is None:
+            await send(sender, "Please reply with *" + "*, *".join(str(x) for x in PACK_SIZES)
+                       + "*, or type *CANCEL*.")
+            return
+        plumber_command_state.pop(sender, None)
+        price = pack_price_cents(n)
+        order = next((o for o in await db(S.store.list_credit_orders, status="pending", plumber_id=plumber["id"])
+                      if o["credits"] == n), None)
+        if order is None:
+            order = await db(S.store.create_credit_order, plumber["id"], n, price)
+            await notify_founder(
+                f"Credit order {order['ref']}: {plumber.get('first_name') or '?'} "
+                f"(+{normalize_phone(plumber.get('whatsapp'))}) wants {n} credits, {credit_rand(price)}.\n"
+                f"Confirm once the EFT is in: /credit {order['ref']}")
+        await send(sender, _payment_instructions(order))
         return
 
     if command == "update_areas":

@@ -133,7 +133,44 @@ class VerificationService:
             "plumber_claim": None, "customer_response": None,
         })
         self.store.log_event("accepted", job_id=job["id"], plumber_id=plumber_id)
-        return self._apply_trial_lead(job)
+        job = self._apply_trial_lead(job)
+        if "trial_lead" in job.get("flags", []):
+            return job
+        return self._apply_credit(job)
+
+    def _apply_credit(self, job: dict) -> dict:
+        """After the trial a lead costs one credit: fee 0 (it is already paid for), flagged, one used.
+        The dispatcher checks the balance before the take, so reaching here with none left means two
+        leads were taken at the same moment on the last credit. The job stands; the full fee applies
+        and the founder is told, so nobody loses a lead over a race."""
+        try:
+            left = self.store.use_credit(job["plumber_id"])
+        except Exception:
+            logger.exception("credit could not be used for job %s; full fee applies", job["id"])
+            left = None
+        if left is None:
+            self.msg.notify_founder(
+                f"No credit left for {self._plumber(job)['first_name']} on {self._short(job)}. "
+                f"The job stands at the full fee ({T.rand(job['fee_cents'])}).")
+            return job
+        job = self.store.update_job(job["id"], fee_cents=0, flags=[*job.get("flags", []), "credit_lead"])
+        self.store.log_event("credit_used", job_id=job["id"], plumber_id=job["plumber_id"],
+                             payload={"left": left})
+        return job
+
+    def _refund_credit(self, job: dict) -> dict:
+        """A job that ends with no charge gives its credit back, once."""
+        flags = job.get("flags", [])
+        if "credit_lead" not in flags or "credit_refunded" in flags:
+            return job
+        job = self.store.update_job(job["id"], flags=[*flags, "credit_refunded"])
+        balance = self.store.add_credits(job["plumber_id"], 1)
+        self.store.log_event("credit_refunded", job_id=job["id"], plumber_id=job["plumber_id"],
+                             payload={"balance": balance})
+        plumber = self.store.get_plumber(job["plumber_id"])
+        if plumber and balance is not None:
+            self.msg.send_plumber(plumber, T.credit_returned(self._short(job), balance))
+        return job
 
     def _apply_trial_lead(self, job: dict) -> dict:
         """If the plumber has a trial lead left, this job is free: fee 0, flagged, and one is used.
@@ -202,6 +239,7 @@ class VerificationService:
             if before != "no_charge":
                 job = self.store.update_job(job["id"], status="no_charge", resolved_at=now)
                 self.store.log_event("no_charge", job_id=job["id"], plumber_id=job["plumber_id"])
+                job = self._refund_credit(job)
             if "no_go_but_customer_confirms" in new_flags:
                 prior = sum(
                     1 for j in self.store.list_jobs(plumber_id=job["plumber_id"])
@@ -655,11 +693,7 @@ class VerificationService:
             jobs = [j for j in self.store.list_jobs(statuses=("charged",), plumber_id=plumber["id"])
                     if not j.get("invoice_id") and j["fee_cents"] > 0]
             if not jobs:
-                inv = self.store.insert_invoice({
-                    "plumber_id": plumber["id"], "week_start": week_start, "job_count": 0,
-                    "total_cents": 0, "status": "zero", "sent_at": now,
-                })
-                self.msg.send_plumber(plumber, T.a10_zero_week(plumber["first_name"], rng, None, None))
+                # Leads are paid for with credits now, so a week with nothing owed gets no message.
                 continue
             total = sum(j["fee_cents"] for j in jobs)
             inv = self.store.insert_invoice({
@@ -742,6 +776,7 @@ class VerificationService:
             job = self.store.update_job(job_id, status="charged", charged_at=now, resolved_at=now)
         elif outcome == "no_charge":
             job = self.store.update_job(job_id, status="no_charge", resolved_at=now)
+            job = self._refund_credit(job)
         else:
             raise ValueError("outcome must be 'charge' or 'no_charge'")
         self.store.log_event("admin_resolved", job_id=job_id, plumber_id=job["plumber_id"],
