@@ -71,6 +71,7 @@ class PostgresStore:
         plumbers_table: str = "plumbers",
         plumbers_active_column: str | None = "active",
         plumbers_trial_column: str | None = "trial_stage",
+        plumbers_credits_column: str | None = "credits",
         min_size: int = 1,
         max_size: int = 5,
         pool: ConnectionPool | None = None,
@@ -84,6 +85,7 @@ class PostgresStore:
         self._plumbers = sql.Identifier(plumbers_table)
         self._active = sql.Identifier(plumbers_active_column) if plumbers_active_column else None
         self._trial = sql.Identifier(plumbers_trial_column) if plumbers_trial_column else None
+        self._credits = sql.Identifier(plumbers_credits_column) if plumbers_credits_column else None
         self.pool = pool or ConnectionPool(
             dsn,
             min_size=min_size,
@@ -223,6 +225,72 @@ class PostgresStore:
         row = self._run(sql.SQL("SELECT {c} AS now_has FROM {t} WHERE id = %s").format(
             t=self._plumbers, c=self._trial), [plumber_id], one=True)
         return (row or {}).get("now_has") or 0
+
+    # ───────────────────────── lead credits ─────────────────────────
+    # plumbers.credits is the balance. Orders live in credit_orders (migration 005).
+
+    def credit_balance(self, plumber_id: str) -> int:
+        if self._credits is None:
+            return 0
+        row = self._run(sql.SQL("SELECT {c} AS n FROM {t} WHERE id = %s").format(
+            t=self._plumbers, c=self._credits), [plumber_id], one=True)
+        return (row or {}).get("n") or 0
+
+    def use_credit(self, plumber_id: str) -> int | None:
+        """Uses one credit. Returns the balance left, or None if there was none to use.
+        One UPDATE, so two leads taken at once can never use the same credit."""
+        if self._credits is None:
+            return None
+        q = sql.SQL("UPDATE {t} SET {c} = {c} - 1 WHERE id = %s AND {c} > 0 RETURNING {c} AS left_over").format(
+            t=self._plumbers, c=self._credits)
+        row = self._run(q, [plumber_id], one=True)
+        return row["left_over"] if row else None
+
+    def add_credits(self, plumber_id: str, n: int) -> int | None:
+        """Adds n credits (n may not be negative). Returns the new balance, or None if no such plumber."""
+        if self._credits is None or n < 0:
+            return None
+        q = sql.SQL("UPDATE {t} SET {c} = COALESCE({c}, 0) + %s WHERE id = %s RETURNING {c} AS balance").format(
+            t=self._plumbers, c=self._credits)
+        row = self._run(q, [n, plumber_id], one=True)
+        return row["balance"] if row else None
+
+    def create_credit_order(self, plumber_id: str, credits: int, price_cents: int) -> dict:
+        n = self._run("SELECT nextval('credit_order_seq') AS n", one=True)["n"]
+        return self._run(
+            "INSERT INTO credit_orders (ref, plumber_id, credits, price_cents) VALUES (%s, %s, %s, %s) RETURNING *",
+            [f"C-{n:04d}", plumber_id, credits, price_cents], one=True)
+
+    def get_credit_order(self, ref: str) -> dict | None:
+        return self._run("SELECT * FROM credit_orders WHERE ref = %s", [ref.upper()], one=True)
+
+    def list_credit_orders(self, *, status: str | None = None, plumber_id: str | None = None) -> list[dict]:
+        where, params = [], []
+        if status:
+            where.append("status = %s"); params.append(status)
+        if plumber_id:
+            where.append("plumber_id = %s"); params.append(plumber_id)
+        q = "SELECT * FROM credit_orders" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at"
+        return self._run(q, params, many=True)
+
+    def cancel_credit_order(self, ref: str) -> bool:
+        row = self._run("UPDATE credit_orders SET status = 'cancelled' WHERE ref = %s AND status = 'pending' "
+                        "RETURNING ref", [ref.upper()], one=True)
+        return bool(row)
+
+    def settle_credit_order(self, ref: str) -> dict | None:
+        """Marks a pending order paid and adds its credits in ONE statement, so confirming twice
+        (or two founders tapping at once) adds them once. Returns {plumber_id, added, balance},
+        or None if the order is unknown or was not pending."""
+        if self._credits is None:
+            return None
+        q = sql.SQL(
+            "WITH o AS (UPDATE credit_orders SET status = 'paid', paid_at = now() "
+            "           WHERE ref = %s AND status = 'pending' RETURNING plumber_id, credits) "
+            "UPDATE {t} p SET {c} = COALESCE(p.{c}, 0) + o.credits FROM o WHERE p.id::text = o.plumber_id "
+            "RETURNING p.id::text AS plumber_id, o.credits AS added, p.{c} AS balance"
+        ).format(t=self._plumbers, c=self._credits)
+        return self._run(q, [ref.upper()], one=True)
 
     # ───────────────────────── conversation state ─────────────────────────
 

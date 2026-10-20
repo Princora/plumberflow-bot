@@ -17,10 +17,10 @@ from dispatch.postgres_store import PostgresDispatchStore
 from dispatch.store import InMemoryDispatchStore
 
 MIGRATIONS = [pathlib.Path(__file__).resolve().parent.parent / "migrations" / n
-              for n in ("001_job_lifecycle.sql", "002_dispatch.sql")]
+              for n in ("001_job_lifecycle.sql", "002_dispatch.sql", "005_credits.sql")]
 SCHEMA = "pf_test"
 TABLES = ("job_lifecycle, invoices, plumber_state, plumber_holds, job_events, plumbers, "
-          "dispatch_offers, dispatch_leads")
+          "dispatch_offers, dispatch_leads, credit_orders")
 
 # Stand-in for your real plumbers table (the migration assumes it already exists).
 PLUMBERS_DDL = """
@@ -40,8 +40,8 @@ class PgTestStore(PostgresDispatchStore):
 
     def add_plumber(self, first_name, *, active=True, **extra):
         return self._run(
-            "insert into plumbers (first_name, active, whatsapp, areas, trial_stage) values (%s, %s, %s, %s, %s) returning *",
-            [first_name, active, extra.get("whatsapp"), extra.get("areas"), extra.get("trial_stage")], one=True)
+            "insert into plumbers (first_name, active, whatsapp, areas, trial_stage, credits) values (%s, %s, %s, %s, %s, %s) returning *",
+            [first_name, active, extra.get("whatsapp"), extra.get("areas"), extra.get("trial_stage"), extra.get("credits") or 0], one=True)
 
 
 def _scoped(dsn: str) -> str:

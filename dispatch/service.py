@@ -78,7 +78,15 @@ class DispatchService:
         return None
 
     def _is_paused(self, plumber: dict) -> list[str]:
-        return sorted(self.store.get_holds(plumber["id"]))
+        reasons = sorted(self.store.get_holds(plumber["id"]))
+        if not self._can_pay_for_lead(plumber):
+            reasons.append("no credits")
+        return reasons
+
+    @staticmethod
+    def _can_pay_for_lead(plumber: dict) -> bool:
+        """A lead is paid for with a trial lead or a credit. Neither left: no new leads until they buy."""
+        return (plumber.get("trial_stage") or 0) > 0 or (plumber.get("credits") or 0) > 0
 
     def _matching(self, lead: dict) -> list[dict]:
         """Active, unpaused plumbers who cover the lead's suburb."""
@@ -194,10 +202,12 @@ class DispatchService:
         n = len(self.store.list_offers(lead_ref=ref, statuses=("offered",)))
         for p in fresh:
             # A plumber with a trial lead left sees "no fee"; the lead is only used if they take it.
-            fee = 0 if (p.get("trial_stage") or 0) > 0 else self.fee_cents
+            on_trial = (p.get("trial_stage") or 0) > 0
+            fee = 0 if on_trial else self.fee_cents
             self.msg.send_plumber(p, T.offer_to_plumber(
                 ref, lead.get("suburb") or "Johannesburg",
-                lead.get("summary") or lead.get("keyword") or "Plumbing job", n, fee))
+                lead.get("summary") or lead.get("keyword") or "Plumbing job", n, fee,
+                None if on_trial else (p.get("credits") or 0)))
         self._refresh(ref)
 
     # ───────────────────────── plumber replies ─────────────────────────
@@ -240,6 +250,9 @@ class DispatchService:
             chosen = open_offers[0]
 
         offer, lead = chosen
+        if not self._can_pay_for_lead(self.store.get_plumber(plumber["id"]) or plumber):
+            self.msg.send_plumber(plumber, VT.out_of_credits())
+            return True
         if not self.store.claim_lead(lead["ref"], plumber["id"], self.now()):
             self.store.update_offer(offer["id"], "lost")
             self.msg.send_plumber(plumber, T.gone(self._label(lead)))
@@ -256,6 +269,8 @@ class DispatchService:
         if job and "trial_lead" in (job.get("flags") or []):
             left = (self.store.get_plumber(plumber["id"]) or {}).get("trial_stage") or 0
             take_text += "\n\n" + VT.trial_lead_taken(left)
+        elif job and "credit_lead" in (job.get("flags") or []):
+            take_text += "\n\n" + VT.credit_lead_taken(self.store.credit_balance(plumber["id"]))
         self.msg.send_plumber(plumber, take_text)
         for other in self.store.list_offers(lead_ref=lead["ref"], statuses=("offered",)):
             self.store.update_offer(other["id"], "lost")

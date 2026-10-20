@@ -312,7 +312,7 @@ def test_done_but_customer_says_never_came_is_disputed_not_charged(env):
 
     clock.set(sast(2026, 10, 9, 17, 5))                      # disputed jobs never reach an invoice
     svc.sweep_invoices()
-    assert store.list_invoices(plumber_id=sipho["id"])[0]["total_cents"] == 0
+    assert store.list_invoices(plumber_id=sipho["id"]) == []         # nothing owed, nothing sent
 
     svc.admin_resolve(job["id"], "no_charge", "no visit happened")
     assert store.get_job(job["id"])["status"] == "no_charge"
@@ -379,13 +379,12 @@ def test_overdue_invoice_reminder_pause_and_restore(env):
     assert msg.plumber_texts()[-1] == "Got it. R220 cleared. Leads are back on."
 
 
-def test_zero_week_message_once(env):
+def test_a_week_with_nothing_owed_sends_nothing(env):
     store, msg, clock, svc, sipho = env
     clock.set(sast(2026, 10, 9, 17, 5))
     svc.sweep_invoices()
-    svc.sweep_invoices()
-    zero = [t for t in msg.plumber_texts() if "No completed jobs" in t]
-    assert len(zero) == 1
+    assert store.list_invoices(plumber_id=sipho["id"]) == []
+    assert msg.plumber_texts() == []
 
 
 def test_quiet_hours_respected(env):
@@ -737,17 +736,17 @@ def test_trial_jobs_are_never_invoiced_and_a_paid_job_still_is(env):
     assert store.get_job(free["id"]).get("invoice_id") is None
 
 
-def test_a_week_of_only_trial_jobs_is_a_zero_week(env):
+def test_a_week_of_only_trial_jobs_sends_nothing(env):
     store, msg, clock, svc, _ = env
     thabo = trial_plumber(store, 1)
     job = accept(svc, thabo)
     svc.on_plumber_message(thabo["id"], "done R1800")
     assert store.get_job(job["id"])["status"] == "charged"
+    before = len(msg.plumber_texts())
     clock.set(sast(2026, 10, 9, 17, 5))
     svc.sweep_invoices()
-    inv = store.list_invoices(plumber_id=thabo["id"])[0]
-    assert inv["status"] == "zero" and inv["total_cents"] == 0
-    assert "Nothing owed" in msg.plumber_texts()[-1]
+    assert store.list_invoices(plumber_id=thabo["id"]) == []
+    assert len(msg.plumber_texts()) == before
 
 
 def test_if_the_trial_count_cannot_be_updated_the_plumber_can_still_take_the_job(env, monkeypatch):
@@ -776,3 +775,65 @@ def test_the_voice_of_the_new_messages(env):
     for text in (T.lead_arrival("Fourways", "geyser", 1, 0), T.trial_lead_taken(1), T.trial_lead_taken(4),
                  T.a5_value_logged(180000, 0), T.a7_customer_confirmed("Thabo", "Sarah", "geyser", "Monday", 0)):
         assert "!" not in text and "R0" not in text
+
+
+# ───────────────────────── lead credits ─────────────────────────
+
+def credit_plumber(store, n, name="Thabo"):
+    return store.add_plumber(name, credits=n)
+
+
+def test_a_job_taken_with_a_credit_uses_one_and_is_never_invoiced(env):
+    store, msg, clock, svc, _ = env
+    thabo = credit_plumber(store, 3)
+    job = accept(svc, thabo)
+    assert job["fee_cents"] == 0 and "credit_lead" in job["flags"]
+    assert store.credit_balance(thabo["id"]) == 2
+    svc.on_plumber_message(thabo["id"], "done R1800")
+    assert "no fee" in msg.plumber_texts()[-1]
+    clock.set(sast(2026, 10, 9, 17, 5))
+    svc.sweep_invoices()
+    assert store.list_invoices(plumber_id=thabo["id"]) == []
+
+
+def test_trial_lead_comes_before_a_credit(env):
+    store, msg, clock, svc, _ = env
+    thabo = store.add_plumber("Thabo", trial_stage=1, credits=2)
+    first = accept(svc, thabo, n=1, phone="0821000001")
+    second = accept(svc, thabo, n=2, phone="0821000002")
+    assert "trial_lead" in first["flags"] and "credit_lead" in second["flags"]
+    assert store.credit_balance(thabo["id"]) == 1
+
+
+def test_no_credit_left_keeps_the_job_at_the_full_fee_and_tells_the_founder(env):
+    store, msg, clock, svc, _ = env
+    thabo = credit_plumber(store, 0)
+    job = accept(svc, thabo)
+    assert job["fee_cents"] == 22000 and "credit_lead" not in job["flags"]
+    assert any("No credit left" in f for f in msg.founder)
+
+
+def test_a_no_go_gives_the_credit_back_once(env):
+    store, msg, clock, svc, _ = env
+    thabo = credit_plumber(store, 2)
+    job = accept(svc, thabo)
+    assert store.credit_balance(thabo["id"]) == 1
+    svc.on_plumber_message(thabo["id"], "no go")
+    assert store.get_job(job["id"])["status"] == "no_charge"
+    assert store.credit_balance(thabo["id"]) == 2
+    assert any("credit is back" in t for t in msg.plumber_texts())
+    svc.sweep_jobs()
+    assert store.credit_balance(thabo["id"]) == 2
+
+
+def test_resolving_a_dispute_as_no_charge_returns_the_credit(env):
+    store, msg, clock, svc, _ = env
+    thabo = credit_plumber(store, 1)
+    job = accept(svc, thabo)
+    store.update_job(job["id"], status="disputed")
+    svc.admin_resolve(job["id"], "no_charge", "never happened")
+    assert store.credit_balance(thabo["id"]) == 1
+    job2 = accept(svc, credit_plumber(store, 1, "Kelo"), n=2, phone="0821000009")
+    store.update_job(job2["id"], status="disputed")
+    svc.admin_resolve(job2["id"], "charge")
+    assert store.credit_balance(job2["plumber_id"]) == 0

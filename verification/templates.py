@@ -21,13 +21,21 @@ def _plural(n: int, one: str, many: str) -> str:
 
 # ───────────────────────── Plumber side ─────────────────────────
 
-def lead_arrival(suburb: str, job_short: str, n_viewing: int, fee_cents: int) -> str:
-    """A1. Photo is attached by the caller."""
+def lead_arrival(suburb: str, job_short: str, n_viewing: int, fee_cents: int, credits_left: int | None = None) -> str:
+    """A1. Photo is attached by the caller.
+    fee_cents 0 is a trial lead. Otherwise, with credits_left given, the lead costs one credit."""
+    if fee_cents == 0:
+        cost = "Trial lead · no fee"
+    elif credits_left is None:
+        cost = f"{rand(fee_cents)} due after the job is done"
+    elif credits_left > 0:
+        cost = f"Uses 1 credit · you have {credits_left}"
+    else:
+        cost = "Uses 1 credit · you have none, reply BUY to top up"
     return (
         f"New job — {suburb}\n"
         f"{job_short}\n\n"
-        f"Free to take · {_plural(n_viewing, 'plumber', 'plumbers')} viewing\n"
-        + ("Trial lead · no fee" if fee_cents == 0 else f"{rand(fee_cents)} due after the job is done")
+        f"{_plural(n_viewing, 'plumber', 'plumbers')} viewing\n{cost}"
     )
 
 
@@ -66,10 +74,25 @@ def trial_lead_taken(left: int) -> str:
     return f"This one is a trial lead, so no fee. {_plural(left, 'trial lead', 'trial leads')} left."
 
 
+def credit_lead_taken(left: int) -> str:
+    if left == 0:
+        return "That used your last credit. Reply BUY to get more before the next lead."
+    return f"That used 1 credit. {_plural(left, 'credit', 'credits')} left."
+
+
+def out_of_credits() -> str:
+    return "You're out of credits, so I can't give you this one yet. Reply BUY to top up, then reply take again."
+
+
+def credit_returned(job_short: str, balance: int) -> str:
+    return (f"The {job_short} job didn't go ahead, so your credit is back. "
+            f"You have {_plural(balance, 'credit', 'credits')}.")
+
+
 def a5_value_logged(job_value_cents: int, fee_cents: int) -> str:
     return (
         f"Logged — {rand(job_value_cents)}.\n\n"
-        + ("Trial lead, so no fee on this one.\n\n" if fee_cents == 0
+        + ("Nothing owed, no fee on this one.\n\n" if fee_cents == 0
            else f"{rand(fee_cents)} on Friday's invoice.\n\n") +
         "Photo of the finished work if you have one — helps if the customer ever queries it."
     )
@@ -91,7 +114,7 @@ def a7_customer_confirmed(
 ) -> str:
     return (
         f"{first_name} — {customer_name} confirmed the {keyword} was sorted on {job_date}.\n\n"
-        + ("Trial lead, so no fee on this one.\n\nIf that's wrong, tell me now."
+        + ("Nothing owed, no fee on this one.\n\nIf that's wrong, tell me now."
            if fee_cents == 0 else
            f"{rand(fee_cents)} on this week's invoice.\n\nIf that's wrong, tell me now and I'll pull it.")
     )
