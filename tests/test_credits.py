@@ -55,6 +55,7 @@ def test_buy_menu_shows_the_packs_and_prices(env):
 
 
 def test_choosing_a_pack_creates_an_order_and_tells_the_founder(env, monkeypatch):
+    monkeypatch.delenv("PAYSHAP_NUMBER", raising=False)
     monkeypatch.setenv("CREDIT_PAYMENT_DETAILS", "FNB|Acc 123456")
     p = buy(env, "5")
     [order] = env.store.list_credit_orders(plumber_id=p["id"])
@@ -81,10 +82,22 @@ def test_asking_for_the_same_pack_twice_reuses_the_open_order(env):
     assert len(env.store.list_credit_orders(plumber_id=p["id"])) == 1
 
 
-def test_without_bank_details_configured_the_plumber_is_told_to_wait(env, monkeypatch):
-    monkeypatch.delenv("CREDIT_PAYMENT_DETAILS", raising=False)
+def test_payshap_number_is_what_the_plumber_is_told_to_pay(env, monkeypatch):
+    monkeypatch.setenv("PAYSHAP_NUMBER", "0821234567")
+    monkeypatch.setenv("PAYSHAP_NAME", "PlumberFlow")
+    monkeypatch.setenv("CREDIT_PAYMENT_DETAILS", "FNB|Acc 123456")       # PayShap wins when both are set
+    p = buy(env, "5")
+    ref = env.store.list_credit_orders(plumber_id=p["id"])[0]["ref"]
+    reply = env.wa_text_to(PLUMBER_PHONE)[-1]
+    assert "PayShap" in reply and "Send R1,045 to 0821234567 (PlumberFlow)" in reply
+    assert f"reference" in reply and ref in reply and "Acc 123456" not in reply
+
+
+def test_without_payment_details_configured_the_plumber_is_told_to_wait(env, monkeypatch):
+    for name in ("PAYSHAP_NUMBER", "PAYSHAP_NAME", "CREDIT_PAYMENT_DETAILS"):
+        monkeypatch.delenv(name, raising=False)
     buy(env, "2")
-    assert "bank details shortly" in env.wa_text_to(PLUMBER_PHONE)[-1]
+    assert "payment details shortly" in env.wa_text_to(PLUMBER_PHONE)[-1]
 
 
 # ───────────────────────── founder confirms ─────────────────────────
