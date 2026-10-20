@@ -125,10 +125,13 @@ AVAILABILITY_OPTIONS = {
 JOIN_KEYWORDS = {"join", "register", "sign up", "signup"}
 PLUMBER_KEYWORDS = {"plumber", "i need a plumber", "need a plumber", "find plumber", "find a plumber"}
 
+HOLD_PENDING = "pending_approval"   # new plumber, not yet approved by the founder
+
 HOLD_LABELS = {
     "unresolved_jobs": "jobs waiting to be closed off",
     "unpaid_invoice":  "an unpaid invoice",
     "self_paused":     "you paused",
+    HOLD_PENDING:      "waiting for approval",
 }
 
 # ---------------------------------------------------------------------------
@@ -209,6 +212,14 @@ async def notify_founder(text: str):
 
 def is_admin(phone: str) -> bool:
     return bool(ADMIN_PHONE) and normalize_phone(phone) == normalize_phone(ADMIN_PHONE)
+
+async def already_registered_text(plumber: dict, tail: str) -> str:
+    name = plumber.get("first_name") or "friend"
+    if HOLD_PENDING in await db(S.store.get_holds, plumber["id"]):
+        return (f"You're signed up, {name}. 👷 We're checking your details and will message you here "
+                f"as soon as you're approved.\n\n{tail}")
+    return f"You're already registered, {name}! 👷\n\n{tail}"
+
 
 async def get_plumber(phone: str) -> dict | None:
     return await db(S.store.find_plumber_by_whatsapp, phone)
@@ -291,9 +302,21 @@ FOUNDER_HELP = (
     "/unpaid — invoices waiting for payment\n"
     "/paid <id> — mark an invoice paid\n"
     "/disputes — jobs that need your decision\n"
-    "/resolve <id> charge|no_charge [note] — settle a dispute\n\n"
+    "/resolve <id> charge|no_charge [note] — settle a dispute\n"
+    "/pending — new plumbers waiting for approval\n"
+    "/approve <id> — let a new plumber start getting leads\n\n"
     "<id> is the first few characters shown in the list."
 )
+
+def _pending_summary(p: dict) -> str:
+    areas = ", ".join(a.title() for a in (p.get("areas") or [])) or "—"
+    services = ", ".join(p.get("services") or []) or "—"
+    exp = p.get("experience_years")
+    pirb = {True: "says PIRB registered", False: "not PIRB registered"}.get(p.get("pirb_registered"), "PIRB not given")
+    return (
+        f"{str(p['id'])[:8]} · {p.get('first_name') or '?'} · +{normalize_phone(p.get('whatsapp'))}\n"
+        f"{exp if exp is not None else '?'} years · {pirb}\n{services}\n{areas}"
+    )
 
 def _rand(cents: int) -> str:
     return f"R{cents / 100:,.0f}" if cents % 100 == 0 else f"R{cents / 100:,.2f}"
@@ -351,6 +374,42 @@ async def handle_founder_command(update: dict):
             await notify_founder(str(e).capitalize() + ".")
             return
         await notify_founder(f"Resolved {job['id'][:8]}: {args[1].replace('_', ' ')}.")
+
+    elif cmd == "/pending":
+        rows = await db(S.store.list_pending_plumbers)
+        if not rows:
+            await notify_founder("No plumbers waiting for approval.")
+            return
+        await notify_founder("Waiting for approval\n\n" + "\n\n".join(_pending_summary(p) for p in rows)
+                             + "\n\nApprove with /approve <id>")
+
+    elif cmd == "/approve":
+        plumber = await db(S.store.find_plumber_by_prefix, args[0]) if args else None
+        if not plumber:
+            await notify_founder("Usage: /approve <id>. No single plumber matches that id. See /pending.")
+            return
+        holds = await db(S.store.get_holds, plumber["id"])
+        if HOLD_PENDING not in holds:
+            await notify_founder(f"{plumber.get('first_name') or 'That plumber'} is not waiting for approval.")
+            return
+        await db(S.store.clear_hold, plumber["id"], HOLD_PENDING)
+        phone = normalize_phone(plumber.get("whatsapp"))
+        name = plumber.get("first_name") or "there"
+        sent = True
+        try:
+            await send(phone, (
+                f"✅ You're approved, {name}.\n\n"
+                "You'll now be offered jobs in your areas. When one comes in, reply *take* to claim it. "
+                "The first plumber to reply gets the job.\n\n"
+                "When a job is finished, send *done*. If it fell through, send *no go*. "
+                "Type *HELP* any time to see all commands."
+            ))
+        except Exception:
+            logger.exception("approval message failed")
+            sent = False
+        await notify_founder(
+            f"Approved {name} ({str(plumber['id'])[:8]})."
+            + ("" if sent else " Could not WhatsApp them. Tell them yourself."))
 
     else:
         await notify_founder(FOUNDER_HELP)
@@ -713,7 +772,7 @@ async def handle_nlu_result(sender: str, text: str, nlu: dict):
     if intent == "register_plumber":
         existing = await get_plumber(sender)
         if existing:
-            await send(sender, f"You're already registered, {existing.get('first_name') or 'friend'}! 👷 Type *STATUS* or *HELP*.")
+            await send(sender, await already_registered_text(existing, "Type *STATUS* or *HELP*."))
             return
         await start_plumber_onboarding(sender)
         return
@@ -759,11 +818,8 @@ async def handle_text(sender: str, text: str):
     if text_lower in JOIN_KEYWORDS:
         existing = await get_plumber(sender)
         if existing:
-            await send(sender, (
-                f"You're already registered, {existing.get('first_name') or 'friend'}! 👷\n\n"
-                "Type *STATUS* to see your account.\n"
-                "Type *HELP* to see all commands."
-            ))
+            await send(sender, await already_registered_text(
+                existing, "Type *STATUS* to see your account.\nType *HELP* to see all commands."))
             return
         await start_plumber_onboarding(sender)
         return
@@ -856,7 +912,7 @@ async def handle_plumber_text(phone: str, text: str):
 
     plumber = await get_plumber(phone)
     if plumber and text.strip().lower() in JOIN_KEYWORDS:
-        await send(phone, f"You're already registered, {plumber.get('first_name') or 'friend'}! 👷\n\nType *HELP* to see all commands.")
+        await send(phone, await already_registered_text(plumber, "Type *HELP* to see all commands."))
         return
     if plumber and await try_plumber_command(phone, text_upper, plumber):
         return
@@ -883,7 +939,9 @@ async def try_plumber_command(sender: str, text_upper: str, plumber: dict) -> bo
     if text_upper == "STATUS":
         holds = sorted(await db(S.store.get_holds, plumber["id"]))
         open_jobs = await db(S.store.open_job_count, plumber["id"])
-        if holds:
+        if HOLD_PENDING in holds:
+            status = "⏳ Waiting for approval. We'll message you here as soon as you're approved."
+        elif holds:
             status = "⏸ Paused (" + ", ".join(HOLD_LABELS.get(h, h) for h in holds) + ")"
         else:
             status = "✅ Available"
@@ -1056,8 +1114,9 @@ async def try_admin_command(sender: str, text_upper: str, raw_text: str) -> bool
             await send(sender, "No plumbers registered yet.")
             return True
         lines = [f"👷 *Registered Plumbers ({len(plumbers)})*\n"]
+        pending_ids = {str(p["id"]) for p in await db(S.store.list_pending_plumbers)}
         for p in plumbers:
-            status_icon = "✅" if p.get("active") else "⏸"
+            status_icon = "⏳" if str(p["id"]) in pending_ids else ("✅" if p.get("active") else "⏸")
             areas = ", ".join(a.title() for a in (p.get("areas") or []))[:50]
             lines.append(
                 f"{status_icon} *{p.get('first_name') or '—'}* (+{normalize_phone(p.get('whatsapp'))})\n"
@@ -1338,32 +1397,47 @@ async def finish_plumber_onboarding(sender: str, state: dict):
         "areas":            state["areas"],
         "availability":     state["availability"],
     }
-    saved = False
+    saved_row = None
     try:
-        await db(S.store.insert_plumber, record)
-        saved = True
+        saved_row = await db(S.store.insert_plumber, record)
         logger.info(f"New plumber saved: {sender}")
     except Exception as e:
         logger.error(f"Plumber insert failed for {sender}: {e}")
         logger.info(f"NEW PLUMBER (manual add needed): {record}")
 
+    # New plumbers wait for the founder's /approve before they are suggested for any lead.
+    held = False
+    if saved_row:
+        try:
+            await db(S.store.add_hold, saved_row["id"], HOLD_PENDING)
+            held = True
+        except Exception:
+            logger.exception("pending hold failed (is migration 004 applied?)")
+
     areas_display = ", ".join(a.title() for a in state["areas"])
     await send(sender, (
-        "🎉 Welcome to PlumberFlow!\n\n"
-        "You're now in our network. Here's what happens next:\n\n"
-        "✅ Free to take — you only pay after a job is done and paid\n"
+        "Thanks, you're signed up. 👷\n\n"
+        "✅ Free to take. You only pay after a job is done and paid.\n"
         f"📍 Covering: {areas_display}\n\n"
-        "When a customer in your area needs a plumber, you'll get a "
-        "WhatsApp message with the suburb and the problem.\n\n"
-        "Reply *take* to claim it. The first plumber to reply gets the job.\n\n"
-        "When the job is finished, send *done*. If it fell through, send *no go*.\n\n"
-        "Type *HELP* any time to see all commands.\n\n"
-        "Good luck! 🔧"
+        "We check every new plumber before sending leads. As soon as you're approved "
+        "we'll message you here.\n\n"
+        "Type *STATUS* any time to see where you are."
     ))
 
     pirb_display = state.get("pirb_number") or "Not registered"
+    short_id = str(saved_row["id"])[:8] if saved_row else None
+    if saved_row and held:
+        headline = f"👷 NEW PLUMBER WAITING FOR APPROVAL\n\nApprove with /approve {short_id}\n\n"
+        outcome = "Saved: yes. Held until you approve."
+    elif saved_row:
+        headline = "⚠️ NEW PLUMBER JOINED, BUT THE APPROVAL HOLD FAILED\n\n"
+        outcome = (f"Saved: yes ({short_id}). NOT held: they can be suggested for leads. "
+                   "Apply migrations/004_pending_approval.sql.")
+    else:
+        headline = "⚠️ NEW PLUMBER, NOT SAVED\n\n"
+        outcome = "Saved: FAILED. Add manually."
     await notify_founder(
-        f"👷 NEW PLUMBER JOINED\n\n"
+        f"{headline}"
         f"Name: {state['first_name']}\n"
         f"Phone: +{sender}\n"
         f"Experience: {state['years_experience']} years\n"
@@ -1371,7 +1445,7 @@ async def finish_plumber_onboarding(sender: str, state: dict):
         f"Services: {', '.join(state['job_types'])}\n"
         f"Areas: {areas_display}\n"
         f"Availability: {state['availability']}\n"
-        f"Saved: {'yes' if saved else 'FAILED — add manually'}"
+        f"{outcome}"
     )
 
 # ===========================================================================
