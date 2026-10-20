@@ -191,6 +191,12 @@ class PostgresStore:
             q = sql.SQL("SELECT * FROM {} WHERE {} IS TRUE").format(self._plumbers, self._active)
         return self._run(q, many=True)
 
+    def ping(self) -> bool:
+        """True if the database answers right now. Used by /health, so it never waits long."""
+        with self.pool.connection(timeout=3) as conn:
+            conn.execute("SELECT 1")
+        return True
+
     # ───────────────────────── trial leads ─────────────────────────
     # plumbers.trial_stage is the number of trial leads still free. NULL means never granted.
 

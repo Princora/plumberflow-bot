@@ -9,7 +9,9 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
+from config_check import ConfigError
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
 from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
@@ -25,7 +27,10 @@ VERIFY_TOKEN            = os.environ.get("VERIFY_TOKEN", "plumberflow_verify_123
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 ADMIN_PHONE             = os.environ.get("ADMIN_PHONE", "")     # your WhatsApp number (no +)
 ANTHROPIC_API_KEY       = os.environ.get("ANTHROPIC_API_KEY")   # for the Haiku 4.5 NLU layer
-TRIAL_LEADS             = int(os.environ.get("TRIAL_LEADS", "5"))  # free jobs given when you /approve a new plumber
+try:
+    TRIAL_LEADS = int(os.environ.get("TRIAL_LEADS", "5"))  # free jobs given when you /approve a new plumber
+except ValueError:
+    TRIAL_LEADS = 5   # config_check reports the bad value by name when the bot starts
 
 logger = logging.getLogger("plumberflow")
 logging.basicConfig(level=logging.INFO)
@@ -72,7 +77,11 @@ async def lifespan(app: FastAPI):
     global S, _loop, _scheduler
     _loop = asyncio.get_running_loop()
     if S is None:
-        S = build_services()
+        try:
+            S = build_services()
+        except ConfigError as e:
+            logger.critical("\n%s", e)    # the whole report, in one block, at the end of the log
+            raise
     if not TELEGRAM_WEBHOOK_SECRET:
         logger.warning("TELEGRAM_WEBHOOK_SECRET is not set: /telegram accepts any caller")
     _scheduler = BackgroundScheduler(timezone="UTC")
@@ -1526,10 +1535,23 @@ async def finish_lead(sender: str, state: dict):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {
-        "status":    "ok",
+    """200 only if the bot is really able to work: started, scheduler running, database answering.
+    Fly's health check reads this, so a version that cannot reach the database is never switched
+    in over a working one."""
+    database = "not started"
+    if S:
+        try:
+            database = "ok" if await db(S.store.ping) else "unreachable"
+        except Exception:
+            logger.warning("health: the database did not answer")
+            database = "unreachable"
+    scheduler = "running" if _scheduler and _scheduler.running else "stopped"
+    healthy = bool(S) and database == "ok" and scheduler == "running"
+    return JSONResponse({
+        "status":    "ok" if healthy else "degraded",
         "service":   "plumberflow",
         "services":  "ready" if S else "not started",
-        "scheduler": "running" if _scheduler and _scheduler.running else "stopped",
+        "database":  database,
+        "scheduler": scheduler,
         "admin":     "configured" if ADMIN_PHONE else "not configured",
-    }
+    }, status_code=200 if healthy else 503)

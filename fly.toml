@@ -10,12 +10,25 @@ primary_region = "jnb"
 
 [build]
 
+# Start the new version beside the old one and switch only once /health says the new one works
+# (started, scheduler running, database answering). A bad secret or an unreachable database then
+# fails the deploy and the version that is running keeps serving. Needs a health check, below.
+[deploy]
+  strategy = "bluegreen"
+
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
 
 [[vm]]
   memory = "512mb"

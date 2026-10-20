@@ -913,3 +913,46 @@ def test_the_saved_plumber_has_the_name_they_gave(env):
     saved = env.store.find_plumber_by_whatsapp(NEW_PLUMBER)
     assert saved["first_name"] == "Lerato"
     assert any("Lerato" in t and "WAITING FOR APPROVAL" in t for t in env.tg_texts())
+
+
+# ───────────────────────── /health ─────────────────────────
+
+def test_health_is_ok_when_everything_works(env):
+    r = env.client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "service": "plumberflow", "services": "ready", "database": "ok",
+                        "scheduler": "running", "admin": "not configured"}
+
+
+def test_health_says_degraded_with_503_when_the_database_does_not_answer(env, monkeypatch):
+    monkeypatch.setattr(env.store, "ping", lambda: False)
+    r = env.client.get("/health")
+    assert r.status_code == 503 and r.json()["status"] == "degraded" and r.json()["database"] == "unreachable"
+
+
+def test_health_survives_the_database_raising(env, monkeypatch):
+    def down():
+        raise RuntimeError("connection refused")
+    monkeypatch.setattr(env.store, "ping", down)
+    r = env.client.get("/health")
+    assert r.status_code == 503 and r.json()["database"] == "unreachable"
+
+
+def test_health_does_not_leak_anything_secret(env):
+    assert "postgres" not in env.client.get("/health").text.lower()
+
+
+def test_starting_with_a_bad_secret_stops_with_the_whole_report(monkeypatch):
+    import services
+    from config_check import ConfigError
+    for k in list(services.os.environ):
+        if k in ("DATABASE_URL", "FOUNDER_USER_ID", "WHATSAPP_TOKEN", "WA_TOKEN", "PHONE_NUMBER_ID", "WA_PHONE_NUMBER_ID",
+                 "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "FOUNDER_CHAT_ID"):
+            monkeypatch.delenv(k)
+    monkeypatch.setenv("DATABASE_URL", "<psql 'postgresql://u:topsecret@h/db'>")
+    monkeypatch.setenv("FOUNDER_USER_ID", "< 123 --stage")
+    monkeypatch.setattr(services, "AppStore", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect")))
+    with pytest.raises(ConfigError) as err:
+        services.build_services()
+    text = str(err.value)
+    assert "DATABASE_URL" in text and "FOUNDER_USER_ID" in text and "topsecret" not in text
