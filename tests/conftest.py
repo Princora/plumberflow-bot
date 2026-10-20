@@ -29,7 +29,8 @@ create table plumbers (
   first_name text not null,
   active boolean not null default true,
   whatsapp text,
-  areas text[]
+  areas text[],
+  trial_stage integer
 );
 """
 
@@ -39,8 +40,8 @@ class PgTestStore(PostgresDispatchStore):
 
     def add_plumber(self, first_name, *, active=True, **extra):
         return self._run(
-            "insert into plumbers (first_name, active, whatsapp, areas) values (%s, %s, %s, %s) returning *",
-            [first_name, active, extra.get("whatsapp"), extra.get("areas")], one=True)
+            "insert into plumbers (first_name, active, whatsapp, areas, trial_stage) values (%s, %s, %s, %s, %s) returning *",
+            [first_name, active, extra.get("whatsapp"), extra.get("areas"), extra.get("trial_stage")], one=True)
 
 
 def _scoped(dsn: str) -> str:

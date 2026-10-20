@@ -192,11 +192,12 @@ class DispatchService:
             return
         self.store.update_lead(ref, status="offered", no_taker_alert_at=None)
         n = len(self.store.list_offers(lead_ref=ref, statuses=("offered",)))
-        text = T.offer_to_plumber(ref, lead.get("suburb") or "Johannesburg",
-                                  lead.get("summary") or lead.get("keyword") or "Plumbing job",
-                                  n, self.fee_cents)
         for p in fresh:
-            self.msg.send_plumber(p, text)
+            # A plumber with a trial lead left sees "no fee"; the lead is only used if they take it.
+            fee = 0 if (p.get("trial_stage") or 0) > 0 else self.fee_cents
+            self.msg.send_plumber(p, T.offer_to_plumber(
+                ref, lead.get("suburb") or "Johannesburg",
+                lead.get("summary") or lead.get("keyword") or "Plumbing job", n, fee))
         self._refresh(ref)
 
     # ───────────────────────── plumber replies ─────────────────────────
@@ -249,9 +250,13 @@ class DispatchService:
             lead_id=lead["ref"], plumber_id=plumber["id"], customer_phone=lead["customer_phone"],
             customer_name=lead.get("customer_name"), suburb=lead.get("suburb"),
             keyword=lead.get("keyword"))
-        self.msg.send_plumber(plumber, VT.take_confirmed(
+        take_text = VT.take_confirmed(
             lead.get("customer_name") or "Customer", lead["customer_phone"],
-            lead.get("address") or "Address: ask the customer"))
+            lead.get("address") or "Address: ask the customer")
+        if job and "trial_lead" in (job.get("flags") or []):
+            left = (self.store.get_plumber(plumber["id"]) or {}).get("trial_stage") or 0
+            take_text += "\n\n" + VT.trial_lead_taken(left)
+        self.msg.send_plumber(plumber, take_text)
         for other in self.store.list_offers(lead_ref=lead["ref"], statuses=("offered",)):
             self.store.update_offer(other["id"], "lost")
             p = self.store.get_plumber(other["plumber_id"])

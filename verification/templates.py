@@ -27,7 +27,7 @@ def lead_arrival(suburb: str, job_short: str, n_viewing: int, fee_cents: int) ->
         f"New job — {suburb}\n"
         f"{job_short}\n\n"
         f"Free to take · {_plural(n_viewing, 'plumber', 'plumbers')} viewing\n"
-        f"{rand(fee_cents)} due after the job is done"
+        + ("Trial lead · no fee" if fee_cents == 0 else f"{rand(fee_cents)} due after the job is done")
     )
 
 
@@ -62,10 +62,15 @@ def a4_confirm_value(job_value_cents: int) -> str:
     return f"{rand(job_value_cents)}. Is that right? Reply YES, or send the right amount."
 
 
+def trial_lead_taken(left: int) -> str:
+    return f"This one is a trial lead, so no fee. {_plural(left, 'trial lead', 'trial leads')} left."
+
+
 def a5_value_logged(job_value_cents: int, fee_cents: int) -> str:
     return (
         f"Logged — {rand(job_value_cents)}.\n\n"
-        f"{rand(fee_cents)} on Friday's invoice.\n\n"
+        + ("Trial lead, so no fee on this one.\n\n" if fee_cents == 0
+           else f"{rand(fee_cents)} on Friday's invoice.\n\n") +
         "Photo of the finished work if you have one — helps if the customer ever queries it."
     )
 
@@ -86,8 +91,9 @@ def a7_customer_confirmed(
 ) -> str:
     return (
         f"{first_name} — {customer_name} confirmed the {keyword} was sorted on {job_date}.\n\n"
-        f"{rand(fee_cents)} on this week's invoice.\n\n"
-        "If that's wrong, tell me now and I'll pull it."
+        + ("Trial lead, so no fee on this one.\n\nIf that's wrong, tell me now."
+           if fee_cents == 0 else
+           f"{rand(fee_cents)} on this week's invoice.\n\nIf that's wrong, tell me now and I'll pull it.")
     )
 
 

@@ -664,3 +664,115 @@ def test_interpreter_failures_mean_no_answer():
     assert ClaudeReplyInterpreter(_Client(error=RuntimeError("down"))).job_value("x") is None
     assert ClaudeReplyInterpreter(_Client('{"label": "maybe"}')).agreement("x", "q") is None
     assert ClaudeReplyInterpreter(_Client(error=RuntimeError("down"))).agreement("x", "q") is None
+
+
+# ───────────────────────── Trial leads ─────────────────────────
+
+def trial_plumber(store, left, name="Thabo"):
+    return store.add_plumber(name, trial_stage=left)
+
+
+def left(store, plumber):
+    return store.get_plumber(plumber["id"]).get("trial_stage")
+
+
+def test_a_job_taken_on_a_trial_lead_is_free_and_uses_one(env):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 2)
+    job = accept(svc, thabo)
+    assert job["fee_cents"] == 0 and "trial_lead" in job["flags"]
+    assert store.get_job(job["id"])["fee_cents"] == 0
+    assert left(store, thabo) == 1
+    assert store.has_event(thabo["id"], "trial_lead_used")
+
+
+def test_when_the_trial_leads_run_out_the_normal_fee_applies(env):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 2)
+    jobs = [accept(svc, thabo, n=i, phone=f"082{i}000000") for i in range(3)]
+    assert [j["fee_cents"] for j in jobs] == [0, 0, 22000]
+    assert "trial_lead" not in jobs[2]["flags"]
+    assert left(store, thabo) == 0                       # never goes below zero
+
+
+def test_taking_the_same_lead_twice_uses_only_one_trial_lead(env):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 3)
+    first = accept(svc, thabo)
+    again = svc.register_acceptance(
+        lead_id=first["lead_id"], plumber_id=thabo["id"], customer_phone="0821111111",
+        customer_name="Sarah", suburb="Fourways", keyword="geyser")
+    assert again["id"] == first["id"] and left(store, thabo) == 2
+
+
+def test_a_plumber_who_never_had_trial_leads_pays_the_normal_fee(env):
+    store, msg, clock, svc, sipho = env                  # Sipho has no trial_stage at all
+    job = accept(svc, sipho)
+    assert job["fee_cents"] == 22000 and "trial_lead" not in job["flags"]
+    assert left(store, sipho) is None                    # NULL stays NULL
+
+
+def test_a_trial_job_says_so_when_the_value_is_logged(env):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 1)
+    accept(svc, thabo)
+    svc.on_plumber_message(thabo["id"], "done R1800")
+    last = msg.plumber_texts()[-1]
+    assert "R1,800" in last and "no fee" in last and "invoice" not in last
+
+
+def test_trial_jobs_are_never_invoiced_and_a_paid_job_still_is(env):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 1)
+    free = accept(svc, thabo, n=1, phone="0821000001")
+    svc.on_plumber_message(thabo["id"], "done R1800")             # finish the free one first
+    paid = accept(svc, thabo, n=2, phone="0821000002")
+    svc.on_plumber_message(thabo["id"], "done R2400")
+    assert (free["fee_cents"], paid["fee_cents"]) == (0, 22000)
+    assert store.get_job(free["id"])["status"] == store.get_job(paid["id"])["status"] == "charged"
+    clock.set(sast(2026, 10, 9, 17, 5))                  # Friday 17:05
+    svc.sweep_invoices()
+    inv = store.list_invoices(plumber_id=thabo["id"])[0]
+    assert inv["total_cents"] == 22000 and inv["job_count"] == 1     # only the paid job
+    assert store.get_job(free["id"]).get("invoice_id") is None
+
+
+def test_a_week_of_only_trial_jobs_is_a_zero_week(env):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 1)
+    job = accept(svc, thabo)
+    svc.on_plumber_message(thabo["id"], "done R1800")
+    assert store.get_job(job["id"])["status"] == "charged"
+    clock.set(sast(2026, 10, 9, 17, 5))
+    svc.sweep_invoices()
+    inv = store.list_invoices(plumber_id=thabo["id"])[0]
+    assert inv["status"] == "zero" and inv["total_cents"] == 0
+    assert "Nothing owed" in msg.plumber_texts()[-1]
+
+
+def test_if_the_trial_count_cannot_be_updated_the_plumber_can_still_take_the_job(env, monkeypatch):
+    store, msg, clock, svc, _ = env
+    thabo = trial_plumber(store, 2)
+
+    def broken(plumber_id):
+        raise RuntimeError("column trial_stage does not exist")
+    monkeypatch.setattr(store, "use_trial_lead", broken)
+    job = accept(svc, thabo)
+    assert job["fee_cents"] == 22000 and "trial_lead" not in job["flags"]   # full fee, job exists
+
+
+def test_grant_gives_trial_leads_once_and_never_overwrites(env):
+    store, msg, clock, svc, sipho = env
+    assert store.grant_trial_leads(sipho["id"], 5) == 5                  # NULL becomes 5
+    store.use_trial_lead(sipho["id"])
+    assert store.grant_trial_leads(sipho["id"], 5) == 4                  # not reset to 5
+    used_up = trial_plumber(store, 0, name="Used")
+    assert store.grant_trial_leads(used_up["id"], 5) == 0                # 0 means used them all
+    assert store.use_trial_lead(used_up["id"]) is None
+
+
+def test_the_voice_of_the_new_messages(env):
+    # same rules as every other plumber message: no emoji, no exclamation marks
+    for text in (T.lead_arrival("Fourways", "geyser", 1, 0), T.trial_lead_taken(1), T.trial_lead_taken(4),
+                 T.a5_value_logged(180000, 0), T.a7_customer_confirmed("Thabo", "Sarah", "geyser", "Monday", 0)):
+        assert "!" not in text and "R0" not in text

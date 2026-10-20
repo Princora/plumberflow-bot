@@ -790,3 +790,89 @@ def test_a_full_signup_with_plain_answers_saves_and_holds_the_plumber(env):
     assert (saved["experience_years"], saved["pirb_registered"]) == (7, False)
     assert saved["areas"] == ["rivonia", "sandton"]
     assert env.store.get_holds(saved["id"]) == {"pending_approval"}
+
+
+# ───────────────────────── trial leads ─────────────────────────
+
+def pending_plumber(env, trial_stage=None, phone=PLUMBER_PHONE, name="Thabo"):
+    p = env.add_plumber(name=name, phone=phone)
+    env.store.plumbers[p["id"]]["trial_stage"] = trial_stage
+    env.store.add_hold(p["id"], "pending_approval")
+    return p
+
+
+def test_approving_a_new_plumber_gives_five_trial_leads_and_says_so(env):
+    lerato = join(env, areas="Randburg")
+    assert env.store.plumbers[lerato["id"]].get("trial_stage") is None      # none until approved
+    env.founder_says(f"/approve {str(lerato['id'])[:8]}")
+    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 5
+    assert any("You have 5 trial leads" in t and "no fee" in t for t in env.wa_text_to(NEW_PLUMBER))
+    assert "5 trial leads" in env.tg_texts()[-1]
+
+
+def test_approving_never_resets_a_plumbers_trial_leads(env):
+    some = pending_plumber(env, trial_stage=2)
+    env.founder_says(f"/approve {p8(some)}")
+    assert env.store.plumbers[some["id"]]["trial_stage"] == 2
+    assert "2 trial leads" in env.tg_texts()[-1]
+
+    used = pending_plumber(env, trial_stage=0, phone="27821112222", name="Used")
+    env.founder_says(f"/approve {p8(used)}")
+    assert env.store.plumbers[used["id"]]["trial_stage"] == 0
+    assert "No trial leads" in env.tg_texts()[-1]
+    assert not any("trial lead" in t for t in env.wa_text_to("27821112222"))
+
+
+def test_one_trial_lead_left_reads_naturally(env):
+    one = pending_plumber(env, trial_stage=1)
+    env.founder_says(f"/approve {p8(one)}")
+    assert any("You have 1 trial lead:" in t for t in env.wa_text_to(PLUMBER_PHONE))
+
+
+def test_status_shows_trial_leads_left_only_when_there_are_some(env):
+    env.add_plumber()
+    env.store.plumbers[next(iter(env.store.plumbers))]["trial_stage"] = 3
+    env.post_wa(PLUMBER_PHONE, text="STATUS")
+    assert "Trial leads left: 3" in env.wa_text_to(PLUMBER_PHONE)[-1]
+    env.store.plumbers[next(iter(env.store.plumbers))]["trial_stage"] = 0
+    env.post_wa(PLUMBER_PHONE, text="STATUS")
+    assert "Trial leads left" not in env.wa_text_to(PLUMBER_PHONE)[-1]
+
+
+def test_a_trial_lead_is_free_from_offer_to_job(env):
+    lerato = join(env, areas="Randburg")
+    env.founder_says(f"/approve {str(lerato['id'])[:8]}")
+    env.run_lead_flow(suburb="Randburg")
+    env.founder_tap(f"o:L-0001:{p8(lerato)}")
+    offer = env.wa_text_to(NEW_PLUMBER)[-1]
+    assert "Trial lead · no fee" in offer and "R220" not in offer
+    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 5         # offered, not yet used
+
+    env.post_wa(NEW_PLUMBER, text="take")
+    job = env.store.get_job_by_lead("L-0001")
+    assert job["fee_cents"] == 0 and "trial_lead" in job["flags"]
+    assert env.store.plumbers[lerato["id"]]["trial_stage"] == 4          # used when they took it
+    took = env.wa_text_to(NEW_PLUMBER)[-1]
+    assert "You've got it." in took and "trial lead, so no fee" in took and "4 trial leads left" in took
+
+
+def test_a_plumber_without_trial_leads_still_sees_the_normal_fee(env):
+    sipho = env.add_plumber()                                            # no trial_stage
+    env.run_lead_flow(suburb="Randburg")
+    env.founder_tap(f"o:L-0001:{p8(sipho)}")
+    offer = env.wa_text_to(PLUMBER_PHONE)[-1]
+    assert "R220 due after the job is done" in offer and "Trial lead" not in offer
+    env.post_wa(PLUMBER_PHONE, text="take")
+    assert env.store.get_job_by_lead("L-0001")["fee_cents"] == 22000
+    assert "trial lead" not in env.wa_text_to(PLUMBER_PHONE)[-1]
+
+
+def test_only_the_plumber_who_takes_it_uses_a_trial_lead(env):
+    a = env.add_plumber(name="Ayanda", phone="27821110001"); env.store.plumbers[a["id"]]["trial_stage"] = 3
+    b = env.add_plumber(name="Bheki", phone="27821110002"); env.store.plumbers[b["id"]]["trial_stage"] = 3
+    env.run_lead_flow(suburb="Randburg")
+    env.founder_tap(f"o:L-0001:{p8(a)}")
+    env.founder_tap(f"o:L-0001:{p8(b)}")
+    env.post_wa("27821110001", text="take")
+    assert env.store.plumbers[a["id"]]["trial_stage"] == 2
+    assert env.store.plumbers[b["id"]]["trial_stage"] == 3               # offered, lost the race, kept theirs

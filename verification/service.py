@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 import re
+import logging
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -34,6 +35,8 @@ from .parsing import (
 )
 from .resolution import A7_AFTER_DAYS, Outcome, resolve
 from .store import Messenger, OPEN_STATUSES, Store
+
+logger = logging.getLogger(__name__)
 
 SAST = ZoneInfo("Africa/Johannesburg")
 FEE_CENTS = 22_000  # flat R220
@@ -130,6 +133,21 @@ class VerificationService:
             "plumber_claim": None, "customer_response": None,
         })
         self.store.log_event("accepted", job_id=job["id"], plumber_id=plumber_id)
+        return self._apply_trial_lead(job)
+
+    def _apply_trial_lead(self, job: dict) -> dict:
+        """If the plumber has a trial lead left, this job is free: fee 0, flagged, and one is used.
+        A failure here must never stop a plumber taking a job, so it falls back to the full fee."""
+        try:
+            left = self.store.use_trial_lead(job["plumber_id"])
+        except Exception:
+            logger.exception("trial lead could not be used for job %s; full fee applies", job["id"])
+            return job
+        if left is None:
+            return job
+        job = self.store.update_job(job["id"], fee_cents=0, flags=[*job.get("flags", []), "trial_lead"])
+        self.store.log_event("trial_lead_used", job_id=job["id"], plumber_id=job["plumber_id"],
+                             payload={"left": left})
         return job
 
     # ───────────────────────── Helpers ─────────────────────────
@@ -632,8 +650,10 @@ class VerificationService:
         for plumber in self.store.list_active_plumbers():
             if any(i["week_start"] == week_start for i in self.store.list_invoices(plumber_id=plumber["id"])):
                 continue
+            # Trial-lead jobs carry no fee, so they are never invoiced (and never count towards the
+            # "three paid jobs" credit offer, which is built from paid invoices).
             jobs = [j for j in self.store.list_jobs(statuses=("charged",), plumber_id=plumber["id"])
-                    if not j.get("invoice_id")]
+                    if not j.get("invoice_id") and j["fee_cents"] > 0]
             if not jobs:
                 inv = self.store.insert_invoice({
                     "plumber_id": plumber["id"], "week_start": week_start, "job_count": 0,

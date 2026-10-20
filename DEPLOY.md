@@ -47,6 +47,13 @@ the version that holds new plumbers for approval**. It supersedes 003 (it allows
 are saved but not held, and the Telegram message says "APPROVAL HOLD FAILED". It also turns on
 PAUSE / RESUME, which otherwise tell the plumber to try again later. Safe to re-run.
 
+Trial leads: `plumbers.trial_stage` is how many free jobs a plumber has left. `/approve` sets it to
+`TRIAL_LEADS` only if it is empty (NULL), so nobody's count is ever reset. A job taken while the
+count is above 0 has a fee of R0, is flagged `trial_lead`, and uses one. The offer says
+"Trial lead · no fee" for that plumber, and only the plumber who takes the lead uses one. Free jobs
+are never invoiced and do not count towards the "three paid jobs" credit offer. To give someone
+more, `UPDATE plumbers SET trial_stage = 3 WHERE id = '...'`. To take them away, set it to 0.
+
 New plumbers wait for the founder. `/pending` in Telegram lists them, `/approve <id>` lets one start
 getting leads and WhatsApps them. Plumbers already in the table are not affected.
 
@@ -95,6 +102,7 @@ fly secrets set DATABASE_URL="<pooled-url>" WA_TOKEN="<token>" WA_PHONE_NUMBER_I
 | `TELEGRAM_WEBHOOK_SECRET` | Random string; Telegram sends it back on every call (step 6) |
 | `ANTHROPIC_API_KEY` | Claude Haiku, for understanding messages |
 | `ADMIN_PHONE` | Optional. Your WhatsApp number, for STATS, PLUMBERS and BROADCAST |
+| `TRIAL_LEADS` | Optional, default `5`. Trial leads given when you `/approve` a plumber who has never had any |
 | `WA_FALLBACK_TEMPLATE` | Optional. Approved template name used when WhatsApp refuses free text (see `WHATSAPP_TEMPLATES.md`) |
 
 The older names `WHATSAPP_TOKEN`, `PHONE_NUMBER_ID`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`

@@ -70,6 +70,7 @@ class PostgresStore:
         *,
         plumbers_table: str = "plumbers",
         plumbers_active_column: str | None = "active",
+        plumbers_trial_column: str | None = "trial_stage",
         min_size: int = 1,
         max_size: int = 5,
         pool: ConnectionPool | None = None,
@@ -82,6 +83,7 @@ class PostgresStore:
         """
         self._plumbers = sql.Identifier(plumbers_table)
         self._active = sql.Identifier(plumbers_active_column) if plumbers_active_column else None
+        self._trial = sql.Identifier(plumbers_trial_column) if plumbers_trial_column else None
         self.pool = pool or ConnectionPool(
             dsn,
             min_size=min_size,
@@ -188,6 +190,33 @@ class PostgresStore:
         else:
             q = sql.SQL("SELECT * FROM {} WHERE {} IS TRUE").format(self._plumbers, self._active)
         return self._run(q, many=True)
+
+    # ───────────────────────── trial leads ─────────────────────────
+    # plumbers.trial_stage is the number of trial leads still free. NULL means never granted.
+
+    def use_trial_lead(self, plumber_id: str) -> int | None:
+        """Uses one trial lead. Returns how many are left, or None if there was none to use.
+        One UPDATE, so two jobs taken at once can never use the same lead."""
+        if self._trial is None:
+            return None
+        q = sql.SQL("UPDATE {t} SET {c} = {c} - 1 WHERE id = %s AND {c} > 0 RETURNING {c} AS left_over").format(
+            t=self._plumbers, c=self._trial)
+        row = self._run(q, [plumber_id], one=True)
+        return row["left_over"] if row else None
+
+    def grant_trial_leads(self, plumber_id: str, n: int) -> int:
+        """Gives n trial leads to a plumber who has never had any (NULL). Anyone who already has
+        a number, including 0 for "used them all", keeps it. Returns the number they now have."""
+        if self._trial is None:
+            return 0
+        q = sql.SQL("UPDATE {t} SET {c} = %s WHERE id = %s AND {c} IS NULL RETURNING {c} AS now_has").format(
+            t=self._plumbers, c=self._trial)
+        row = self._run(q, [n, plumber_id], one=True)
+        if row:
+            return row["now_has"]
+        row = self._run(sql.SQL("SELECT {c} AS now_has FROM {t} WHERE id = %s").format(
+            t=self._plumbers, c=self._trial), [plumber_id], one=True)
+        return (row or {}).get("now_has") or 0
 
     # ───────────────────────── conversation state ─────────────────────────
 
