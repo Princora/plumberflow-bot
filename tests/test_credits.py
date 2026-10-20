@@ -30,6 +30,14 @@ def test_unknown_pack_has_no_price():
         C.pack_price_cents(3)
 
 
+@pytest.mark.parametrize("raw,shown", [
+    ("+27821234567", "0821234567"), ("27821234567", "0821234567"), ("+27 82 123 4567", "0821234567"),
+    ("0027821234567", "0821234567"), ("0821234567", "0821234567"), ("082 123 4567", "0821234567"),
+    ("", ""), ("+4420712345678", "+4420712345678")])
+def test_local_number(raw, shown):
+    assert C.local_number(raw) == shown
+
+
 # ───────────────────────── buying ─────────────────────────
 
 def founder_buttons(env):
@@ -83,7 +91,7 @@ def test_asking_for_the_same_pack_twice_reuses_the_open_order(env):
 
 
 def test_payshap_number_is_what_the_plumber_is_told_to_pay(env, monkeypatch):
-    monkeypatch.setenv("PAYSHAP_NUMBER", "0821234567")
+    monkeypatch.setenv("PAYSHAP_NUMBER", "+27 82 123 4567")            # shown the way people dial it
     monkeypatch.setenv("PAYSHAP_NAME", "PlumberFlow")
     monkeypatch.setenv("CREDIT_PAYMENT_DETAILS", "FNB|Acc 123456")       # PayShap wins when both are set
     p = buy(env, "5")
