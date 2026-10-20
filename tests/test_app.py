@@ -78,6 +78,13 @@ class MemoryAppStore(InMemoryDispatchStore):
     def find_job_by_prefix(self, prefix):
         return self._prefix(self.jobs.values(), prefix)
 
+    def find_plumber_by_prefix(self, prefix):
+        return self._prefix([dict(p, id=str(p["id"])) for p in self.plumbers.values()], prefix)
+
+    def list_pending_plumbers(self):
+        pending = {pid for pid, reason in self.holds if reason == "pending_approval"}
+        return [p for p in self.plumbers.values() if p["id"] in pending]
+
     def list_unpaid_invoices(self):
         return [dict(i, first_name=(self.plumbers.get(i["plumber_id"]) or {}).get("first_name"))
                 for i in self.invoices.values() if i["status"] == "sent"]
@@ -283,7 +290,7 @@ def test_new_plumber_onboarding_saves_a_row_and_tells_the_founder(env):
     assert saved["first_name"] == "Lerato" and saved["experience_years"] == 7
     assert saved["services"] == ["Burst pipe", "Blocked drain"]
     assert saved["areas"] == ["randburg", "sandton"]
-    assert any("NEW PLUMBER JOINED" in t and "Lerato" in t for t in env.tg_texts())
+    assert any("WAITING FOR APPROVAL" in t and "Lerato" in t for t in env.tg_texts())
 
 
 # ───────────────────────── verification hand-offs ─────────────────────────
@@ -570,3 +577,127 @@ def test_an_unclear_or_invented_model_answer_asks_again(env, monkeypatch, answer
         env.post_wa(CUSTOMER, text=text)
     assert main.conversations[CUSTOMER]["stage"] == "job_type"
     assert "I didn't catch that" in env.wa_text_to(CUSTOMER)[-1]
+
+
+# ───────────────────────── new plumbers wait for approval ─────────────────────────
+
+NEW_PLUMBER = "27835550000"
+
+
+def join(env, phone=NEW_PLUMBER, areas="Randburg, Sandton"):
+    for text in ("join", "Lerato", "7, PIRB123", "1, 2", areas, "1", "YES"):
+        env.post_wa(phone, text=text)
+    return env.store.find_plumber_by_whatsapp(phone)
+
+
+def founder_text(env, fragment):
+    return [t for t in env.tg_texts() if fragment in t]
+
+
+def test_a_new_plumber_is_held_and_told_to_wait(env):
+    lerato = join(env)
+    assert env.store.get_holds(lerato["id"]) == {"pending_approval"}
+    welcome = env.wa_text_to(NEW_PLUMBER)[-1]
+    assert "approved" in welcome and "Welcome" not in welcome
+    assert "reply *take*" not in welcome.lower()               # no "you'll get jobs" promise yet
+    alert = founder_text(env, "WAITING FOR APPROVAL")[-1]
+    assert f"/approve {str(lerato['id'])[:8]}" in alert and "Held until you approve" in alert
+
+
+def test_a_pending_plumber_is_not_suggested_for_leads(env):
+    lerato = join(env, areas="Randburg")
+    env.run_lead_flow(suburb="Randburg")
+    sends = [p for m, p in env.tg_calls if m == "sendMessage"]
+    buttons = [b["callback_data"] for row in sends[-1]["reply_markup"]["inline_keyboard"] for b in row]
+    assert not any(b.startswith("o:") for b in buttons)        # nobody to suggest
+    assert not any(b.startswith("m:") for b in buttons)
+    assert f"l:L-0001" in buttons                               # "Pick a plumber" is still there
+    assert lerato["id"] not in {o["plumber_id"] for o in env.store.offers.values()}
+
+
+def test_the_founder_can_still_offer_anyway_to_a_pending_plumber(env):
+    lerato = join(env, areas="Randburg")
+    env.run_lead_flow(suburb="Randburg")
+    env.founder_tap(f"o:L-0001:{p8(lerato)}")
+    assert "Offer anyway?" in env.tg_texts()[-1]               # an explicit step, never automatic
+
+
+def test_pending_lists_the_plumber_and_approve_releases_them(env):
+    lerato = join(env, areas="Randburg")
+    env.founder_says("/pending")
+    listing = env.tg_texts()[-1]
+    assert "Lerato" in listing and str(lerato["id"])[:8] in listing and "7 years" in listing
+
+    env.founder_says(f"/approve {str(lerato['id'])[:8]}")
+    assert env.store.get_holds(lerato["id"]) == set()
+    assert any("approved" in t and "Lerato" in t for t in env.wa_text_to(NEW_PLUMBER))
+    assert "Approved Lerato" in env.tg_texts()[-1]
+
+    env.founder_says("/pending")
+    assert env.tg_texts()[-1] == "No plumbers waiting for approval."
+
+    env.run_lead_flow(suburb="Randburg")                        # now suggested like anyone else
+    sends = [p for m, p in env.tg_calls if m == "sendMessage"]
+    buttons = [b["callback_data"] for row in sends[-1]["reply_markup"]["inline_keyboard"] for b in row]
+    assert f"o:L-0001:{p8(lerato)}" in buttons
+
+
+def test_approve_needs_a_real_waiting_plumber(env):
+    sipho = env.add_plumber()                                   # an existing, active plumber
+    env.founder_says("/approve")
+    assert "Usage: /approve" in env.tg_texts()[-1]
+    env.founder_says("/approve zzzz")
+    assert "No single plumber" in env.tg_texts()[-1]
+    env.founder_says(f"/approve {p8(sipho)}")
+    assert "not waiting for approval" in env.tg_texts()[-1]
+    assert env.store.get_holds(sipho["id"]) == set()
+
+
+def test_only_the_founder_can_approve(env):
+    lerato = join(env)
+    env.post_tg({"message": {"from": {"id": 123}, "chat": {"id": 111}, "text": f"/approve {str(lerato['id'])[:8]}"}})
+    assert env.store.get_holds(lerato["id"]) == {"pending_approval"}
+
+
+def test_a_pending_plumber_cannot_resume_their_way_in(env):
+    lerato = join(env)
+    env.post_wa(NEW_PLUMBER, text="RESUME")
+    assert env.store.get_holds(lerato["id"]) == {"pending_approval"}
+    assert "waiting for approval" in env.wa_text_to(NEW_PLUMBER)[-1]
+
+
+def test_a_pending_plumber_sees_waiting_in_status_and_when_they_join_again(env):
+    join(env)
+    env.post_wa(NEW_PLUMBER, text="STATUS")
+    assert "Waiting for approval" in env.wa_text_to(NEW_PLUMBER)[-1]
+    env.post_wa(NEW_PLUMBER, text="join")
+    again = env.wa_text_to(NEW_PLUMBER)[-1]
+    assert "approved" in again and "already registered" not in again
+
+
+def test_existing_plumbers_are_untouched(env):
+    sipho = env.add_plumber()
+    env.post_wa(PLUMBER_PHONE, text="STATUS")
+    assert "Available" in env.wa_text_to(PLUMBER_PHONE)[-1]
+    env.run_lead_flow()
+    sends = [p for m, p in env.tg_calls if m == "sendMessage"]
+    buttons = [b["callback_data"] for row in sends[-1]["reply_markup"]["inline_keyboard"] for b in row]
+    assert f"o:L-0001:{p8(sipho)}" in buttons
+
+
+def test_if_the_hold_cannot_be_set_the_founder_is_told_loudly(env, monkeypatch):
+    def refuse(plumber_id, reason):
+        raise RuntimeError("violates check constraint plumber_holds_reason_check")
+    monkeypatch.setattr(env.store, "add_hold", refuse)
+    join(env)
+    alert = founder_text(env, "HOLD FAILED")[-1]
+    assert "NOT held" in alert and "004_pending_approval.sql" in alert
+    assert "Lerato" in alert
+
+
+def test_if_the_plumber_cannot_be_saved_the_founder_is_told(env, monkeypatch):
+    def refuse(row):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(env.store, "insert_plumber", refuse)
+    join(env)
+    assert "NOT SAVED" in founder_text(env, "NOT SAVED")[-1]

@@ -80,6 +80,15 @@ class AppStore(PostgresDispatchStore):
             [prefix + "%"], many=True)
         return rows[0] if len(rows) == 1 else None
 
+    def find_plumber_by_prefix(self, prefix: str) -> dict | None:
+        return self._by_prefix("plumbers", prefix)
+
+    def list_pending_plumbers(self) -> list[dict]:
+        """Plumbers who finished onboarding and are waiting for /approve, oldest first."""
+        return self._run(
+            "SELECT p.* FROM plumbers p JOIN plumber_holds h ON h.plumber_id = p.id::text "
+            "WHERE h.reason = 'pending_approval' ORDER BY p.created_at", many=True)
+
     def find_invoice_by_prefix(self, prefix: str) -> dict | None:
         return self._by_prefix("invoices", prefix)
 

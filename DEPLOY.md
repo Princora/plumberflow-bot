@@ -9,7 +9,7 @@ services.py          Builds the stores, clients and services from environment va
 app_store.py         Plumber registry and admin queries on top of the packages
 dispatch/            Telegram buttons, WhatsApp offer, first "take" wins
 verification/        Done / no go, customer checks, invoices, reminders
-migrations/          001 job lifecycle, 002 dispatch, 003 self-pause
+migrations/          001 job lifecycle, 002 dispatch, 003 self-pause, 004 pending approval
 tests/               pytest suite
 WHATSAPP_TEMPLATES.md   Templates to submit to Meta
 ```
@@ -38,11 +38,17 @@ Migrations are applied with the **direct** connection string (host without `-poo
 ```bash
 psql "$NEON_DIRECT_URL" -f migrations/001_job_lifecycle.sql
 psql "$NEON_DIRECT_URL" -f migrations/002_dispatch.sql
-psql "$NEON_DIRECT_URL" -f migrations/003_self_pause.sql
+psql "$NEON_DIRECT_URL" -f migrations/004_pending_approval.sql
 ```
 
-001 and 002 are already applied on the PlumberFlow project. 003 lets plumbers use PAUSE and
-RESUME; without it those two commands tell the plumber to try again later.
+001 and 002 are already applied on the PlumberFlow project. 004 **must be applied before you deploy
+the version that holds new plumbers for approval**. It supersedes 003 (it allows the same
+`self_paused` reason as well as `pending_approval`), so 003 can be skipped. Without 004, new plumbers
+are saved but not held, and the Telegram message says "APPROVAL HOLD FAILED". It also turns on
+PAUSE / RESUME, which otherwise tell the plumber to try again later. Safe to re-run.
+
+New plumbers wait for the founder. `/pending` in Telegram lists them, `/approve <id>` lets one start
+getting leads and WhatsApps them. Plumbers already in the table are not affected.
 
 The bot runs on the **pooled** string (host contains `-pooler`), set as `DATABASE_URL`.
 
