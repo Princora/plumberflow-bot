@@ -90,3 +90,87 @@ def test_clear_job_types(text, job):
 ])
 def test_everything_else_goes_to_the_model(text):
     assert parse_job_type_text(text) is None
+
+
+# ───────────────────────── onboarding: experience and PIRB ─────────────────────────
+
+from datetime import date
+
+from intake import parse_experience, parse_pirb, parse_years
+
+TODAY = date(2026, 10, 20)
+
+
+@pytest.mark.parametrize("text,years", [
+    ("5", 5),
+    ("5 years", 5),                  # was rejected
+    ("5 yrs", 5),
+    ("5yrs", 5),
+    ("Five years", 5),
+    ("twenty five years", 25),
+    ("10+ years", 10),
+    ("5-7 years", 5),                # the lower end
+    ("5 years experience", 5),
+    ("about 12 years now", 12),
+    ("a year", 1),
+    ("6 months", 0),
+    ("less than a year", 0),
+    ("since 2015", 11),
+    ("5 years since 2015", 5),       # a stated number beats a "since" next to it
+    ("5.", 5),
+    ("5, PIRB12345", 5),
+])
+def test_years_in_plain_words(text, years):
+    assert parse_years(text, TODAY) == years
+
+
+@pytest.mark.parametrize("text", ["", "hello", "lots", "many", "yes", "1990", "250 years", "since 1850"])
+def test_no_clear_years(text):
+    assert parse_years(text, TODAY) is None
+
+
+@pytest.mark.parametrize("text,registered,number", [
+    ("5, PIRB12345", True, "PIRB 12345"),
+    ("7, PIRB123", True, "PIRB 123"),
+    ("5 years, PIRB 4411", True, "PIRB 4411"),
+    ("15 years PIRB no. 55821", True, "PIRB 55821"),
+    ("12 years, I'm registered with PIRB number 99812", True, "PIRB 99812"),
+    ("5, 12345", True, "PIRB 12345"),
+    ("3, No PIRB", False, None),
+    ("5 years, not registered", False, None),
+    ("20 years no pirb", False, None),
+    ("3 years, applying for PIRB", False, None),
+    ("5 years, pirb: none", False, None),
+    ("5, yes", True, None),
+    ("5 years, registered", True, None),
+    # Not stated: the bot asks.
+    ("5", None, None),
+    ("5 years", None, None),
+    ("10+ years", None, None),
+    ("3 years, not sure about PIRB", None, None),
+    # A year is not a PIRB number.
+    ("since 2015", None, None),
+    ("5 years since 2015", None, None),
+    ("1990", None, None),
+])
+def test_pirb_in_the_same_message(text, registered, number):
+    pirb = parse_experience(text, TODAY).pirb
+    assert (pirb.registered, pirb.number) == (registered, number)
+
+
+@pytest.mark.parametrize("text,registered,number", [
+    ("NO", False, None),
+    ("nope", False, None),
+    ("not yet", False, None),
+    ("PIRB12345", True, "PIRB 12345"),
+    ("4411", True, "PIRB 4411"),
+    ("123", True, "PIRB 123"),
+    ("1990", True, "PIRB 1990"),             # asked directly, so a number is a number
+    ("yes", True, None),
+    ("yebo I'm registered", True, None),
+    ("hmm", None, None),
+    ("I don't know", None, None),
+])
+def test_pirb_asked_on_its_own(text, registered, number):
+    pirb = parse_pirb(text, bare_min_digits=3, skip_years=False)
+    assert (pirb.registered, pirb.number) == (registered, number)

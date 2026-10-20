@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, Response
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
 from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
-from intake import parse_job_type_text, parse_urgency_text
+from intake import parse_experience, parse_job_type_text, parse_pirb, parse_urgency_text
 from dispatch.telegram import handle_telegram_update
 from services import Services, build_services
 
@@ -1266,6 +1266,36 @@ async def start_plumber_onboarding(sender: str):
         "What's your first name?"
     ))
 
+_ASK_PIRB = "Are you PIRB registered? Send your PIRB number, for example *PIRB12345*, or reply *NO*."
+
+
+def _save_pirb(state: dict, pirb) -> None:
+    state["pirb_registered"] = pirb.registered
+    state["pirb_number"] = pirb.number
+
+
+def _pirb_display(state: dict) -> str:
+    if not state.get("pirb_registered"):
+        return "Not registered"
+    return state.get("pirb_number") or "Says registered, no number given"
+
+
+async def _ask_services(sender: str, state: dict) -> None:
+    state["stage"] = "ob_services"
+    await send(sender, (
+        "━━━━━━━━━━━━━━━\n"
+        "Step 3 of 6\n\n"
+        "Which services do you offer?\n\n"
+        "Reply with the numbers separated by commas:\n\n"
+        "1️⃣ Burst pipe\n"
+        "2️⃣ Blocked drain\n"
+        "3️⃣ Geyser problem\n"
+        "4️⃣ Leak\n"
+        "5️⃣ Other / General plumbing\n\n"
+        "Example: *1, 2, 4*  or  *1, 2, 3, 4, 5*"
+    ))
+
+
 async def handle_plumber_onboarding(sender: str, text: str):
     state = plumber_onboarding[sender]
     stage = state["stage"]
@@ -1287,37 +1317,35 @@ async def handle_plumber_onboarding(sender: str, text: str):
             "Step 2 of 6\n\n"
             "How many years of plumbing experience do you have?\n\n"
             "Also, are you PIRB registered?\n"
-            "Reply in this format:\n"
-            "👉 *5, PIRB12345*  (years, then PIRB number)\n"
-            "👉 *3, No PIRB*    (years, then 'No PIRB' if not registered)"
+            "Reply in your own words, for example:\n"
+            "👉 *5 years, PIRB12345*  (years, then your PIRB number)\n"
+            "👉 *3 years, no PIRB*  (if you're not registered)\n"
+            "Not sure about the PIRB part? Just send the years and I'll ask."
         ))
 
     elif stage == "ob_experience":
-        parts = [p.strip() for p in text.split(",", 1)]
-        if not parts[0].isdigit():
-            await send(sender, "Please reply with your years of experience and PIRB status.\nExample: *5, PIRB12345* or *3, No PIRB*")
+        exp = parse_experience(text)
+        if exp.years is None:
+            await send(sender, (
+                "I didn't catch the years. How many years of plumbing experience do you have?\n"
+                "For example: *5 years* or *5 years, PIRB12345*"
+            ))
             return
-        state["years_experience"] = int(parts[0])
-        pirb_part = parts[1].strip() if len(parts) > 1 else ""
-        if pirb_part.lower().startswith("no") or pirb_part == "":
-            state["pirb_registered"] = False
-            state["pirb_number"]     = None
-        else:
-            state["pirb_registered"] = True
-            state["pirb_number"]     = pirb_part.upper().replace("PIRB", "PIRB ").strip()
-        state["stage"] = "ob_services"
-        await send(sender, (
-            "━━━━━━━━━━━━━━━\n"
-            "Step 3 of 6\n\n"
-            "Which services do you offer?\n\n"
-            "Reply with the numbers separated by commas:\n\n"
-            "1️⃣ Burst pipe\n"
-            "2️⃣ Blocked drain\n"
-            "3️⃣ Geyser problem\n"
-            "4️⃣ Leak\n"
-            "5️⃣ Other / General plumbing\n\n"
-            "Example: *1, 2, 4*  or  *1, 2, 3, 4, 5*"
-        ))
+        state["years_experience"] = exp.years
+        if exp.pirb.registered is None:
+            state["stage"] = "ob_pirb"
+            await send(sender, _ASK_PIRB)
+            return
+        _save_pirb(state, exp.pirb)
+        await _ask_services(sender, state)
+
+    elif stage == "ob_pirb":
+        pirb = parse_pirb(text, bare_min_digits=3, skip_years=False)
+        if pirb.registered is None:
+            await send(sender, "Sorry, I didn't catch that. " + _ASK_PIRB)
+            return
+        _save_pirb(state, pirb)
+        await _ask_services(sender, state)
 
     elif stage == "ob_services":
         selected = [s.strip() for s in text.split(",")]
@@ -1359,7 +1387,7 @@ async def handle_plumber_onboarding(sender: str, text: str):
         availability = AVAILABILITY_OPTIONS.get(text) or text
         state["availability"] = availability
         state["stage"]        = "ob_confirmation"
-        pirb_display  = state["pirb_number"] if state.get("pirb_registered") else "Not registered"
+        pirb_display  = _pirb_display(state)
         areas_display = ", ".join(a.title() for a in state["areas"])
         services_display = ", ".join(state["job_types"])
         await send(sender, (
@@ -1424,7 +1452,7 @@ async def finish_plumber_onboarding(sender: str, state: dict):
         "Type *STATUS* any time to see where you are."
     ))
 
-    pirb_display = state.get("pirb_number") or "Not registered"
+    pirb_display = _pirb_display(state)
     short_id = str(saved_row["id"])[:8] if saved_row else None
     if saved_row and held:
         headline = f"👷 NEW PLUMBER WAITING FOR APPROVAL\n\nApprove with /approve {short_id}\n\n"
