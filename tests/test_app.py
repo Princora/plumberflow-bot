@@ -2,7 +2,9 @@
 hand-offs, plumber commands, founder commands. Real services, fake HTTP, in-memory store.
 The SQL behind AppStore is checked separately against Postgres."""
 
+import hmac
 import itertools
+import json
 import re
 from datetime import datetime, timezone
 
@@ -135,9 +137,19 @@ class Env:
         msg.setdefault("id", mid)
         body = {"entry": [{"changes": [{"value": {
             "contacts": [{"wa_id": phone, "profile": {"name": name}}], "messages": [msg]}}]}]}
-        r = self.client.post("/webhook", json=body)
+        r = self.post_wa_raw(body)
         assert r.status_code == 200
         return r
+
+    def post_wa_raw(self, body, signature="auto"):
+        """Posts like Meta does: the exact bytes, with X-Hub-Signature-256 when an app secret is set."""
+        raw = json.dumps(body).encode()
+        headers = {"Content-Type": "application/json"}
+        if signature == "auto" and main.WA_APP_SECRET:
+            signature = "sha256=" + hmac.new(main.WA_APP_SECRET.encode(), raw, "sha256").hexdigest()
+        if signature not in ("auto", None):
+            headers["X-Hub-Signature-256"] = signature
+        return self.client.post("/webhook", content=raw, headers=headers)
 
     def post_tg(self, update, secret=None):
         headers = {"X-Telegram-Bot-Api-Secret-Token": secret} if secret else {}
@@ -164,6 +176,7 @@ def env(monkeypatch):
     monkeypatch.setattr(main, "anthropic_client", None)
     monkeypatch.setattr(main, "TELEGRAM_WEBHOOK_SECRET", "")
     monkeypatch.setattr(main, "ADMIN_PHONE", "")
+    monkeypatch.setattr(main, "WA_APP_SECRET", "")
     for state in (main.conversations, main.plumber_onboarding, main.plumber_command_state, main.plumber_name_asks,
                   main.profile_names, main._seen_message_ids):
         state.clear()
@@ -992,3 +1005,70 @@ def test_named_plumber_is_never_asked(env):
     env.add_plumber()
     env.post_wa(PLUMBER_PHONE, text="hello")
     assert env.wa_text_to(PLUMBER_PHONE) == []
+
+
+# ───────────────────────── who may use the admin functions ─────────────────────────
+
+ADMIN = "27821230000"
+
+
+def admin_texts(env):
+    return env.wa_text_to(ADMIN)
+
+
+def test_admin_commands_work_for_the_admin_number_when_meta_is_verified(env, monkeypatch):
+    monkeypatch.setattr(main, "ADMIN_PHONE", "082 123 0000")
+    monkeypatch.setattr(main, "WA_APP_SECRET", "appsecret")
+    env.add_plumber()
+    env.post_wa(ADMIN, text="PLUMBERS")
+    assert any("Sipho" in t for t in admin_texts(env))
+
+
+def test_nobody_else_can_use_admin_commands(env, monkeypatch):
+    monkeypatch.setattr(main, "ADMIN_PHONE", "082 123 0000")
+    monkeypatch.setattr(main, "WA_APP_SECRET", "appsecret")
+    env.add_plumber()
+    other = "27829999999"
+    for text in ("PLUMBERS", "STATS", "BROADCAST hello everyone"):
+        env.post_wa(other, text=text)
+    assert not any("Sipho" in t or "Stats" in t for t in env.wa_text_to(other))
+    assert env.wa_text_to(PLUMBER_PHONE) == []                      # nothing was broadcast
+
+
+def test_a_forged_admin_message_is_rejected_when_the_signature_is_wrong(env, monkeypatch):
+    monkeypatch.setattr(main, "ADMIN_PHONE", "082 123 0000")
+    monkeypatch.setattr(main, "WA_APP_SECRET", "appsecret")
+    env.add_plumber()
+    body = {"entry": [{"changes": [{"value": {"messages": [
+        {"from": ADMIN, "id": "wamid.forged", "type": "text", "text": {"body": "BROADCAST pay me"}}]}}]}]}
+    for sig in (None, "sha256=" + "0" * 64, "garbage"):
+        assert env.post_wa_raw(body, signature=sig).status_code == 403
+    assert env.wa_text_to(PLUMBER_PHONE) == [] and admin_texts(env) == []
+
+
+def test_real_customer_messages_still_work_with_a_correct_signature(env, monkeypatch):
+    monkeypatch.setattr(main, "WA_APP_SECRET", "appsecret")
+    env.post_wa(CUSTOMER, text="help")
+    assert any("PlumberFlow commands" in t for t in env.wa_text_to(CUSTOMER))
+
+
+def test_admin_commands_are_off_until_the_app_secret_is_set(env, monkeypatch):
+    monkeypatch.setattr(main, "ADMIN_PHONE", "082 123 0000")
+    env.add_plumber()
+    env.post_wa(ADMIN, text="PLUMBERS")
+    assert not any("Sipho" in t for t in admin_texts(env))
+    assert env.client.get("/health").json()["admin"] == "off: set WA_APP_SECRET"
+    monkeypatch.setattr(main, "WA_APP_SECRET", "appsecret")
+    assert env.client.get("/health").json()["admin"] == "configured"
+
+
+def test_a_malformed_webhook_body_is_a_400_not_a_crash(env):
+    assert env.client.post("/webhook", content=b"not json").status_code == 400
+    assert env.client.post("/webhook", content=b"[1,2]").status_code == 400
+
+
+def test_telegram_commands_ignore_everyone_but_the_founder(env):
+    env.add_plumber()
+    env.post_tg({"message": {"from": {"id": FOUNDER + 7}, "chat": {"id": 1}, "text": "/pending"}})
+    env.post_tg({"callback_query": {"id": "x", "from": {"id": FOUNDER + 7}, "data": "s:L-0001"}})
+    assert env.tg_texts() == []
