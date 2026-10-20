@@ -164,7 +164,7 @@ def env(monkeypatch):
     monkeypatch.setattr(main, "anthropic_client", None)
     monkeypatch.setattr(main, "TELEGRAM_WEBHOOK_SECRET", "")
     monkeypatch.setattr(main, "ADMIN_PHONE", "")
-    for state in (main.conversations, main.plumber_onboarding, main.plumber_command_state,
+    for state in (main.conversations, main.plumber_onboarding, main.plumber_command_state, main.plumber_name_asks,
                   main.profile_names, main._seen_message_ids):
         state.clear()
     with TestClient(main.app) as client:
@@ -958,3 +958,37 @@ def test_starting_with_a_bad_secret_stops_with_the_whole_report(monkeypatch):
         services.build_services()
     text = str(err.value)
     assert "DATABASE_URL" in text and "FOUNDER_USER_ID" in text and "topsecret" not in text
+
+
+# ───────────────────────── plumbers added without a name ─────────────────────────
+
+def test_nameless_plumber_is_asked_for_their_name_and_it_is_saved(env):
+    p = env.add_plumber(name="Unnamed")
+    env.post_wa(PLUMBER_PHONE, text="hello, are there any leads?")
+    assert any("first name" in t for t in env.wa_text_to(PLUMBER_PHONE))
+    env.post_wa(PLUMBER_PHONE, text="my name is sipho")
+    assert env.store.plumbers[p["id"]]["first_name"] == "Sipho"
+    assert any("Sipho" in t and "saved" in t for t in env.wa_text_to(PLUMBER_PHONE))
+    env.post_wa(PLUMBER_PHONE, text="anything else")
+    assert len([t for t in env.wa_text_to(PLUMBER_PHONE) if "first name" in t]) == 1
+
+
+def test_nameless_plumber_command_still_works_then_asks(env):
+    env.add_plumber(name="Unnamed")
+    env.post_wa(PLUMBER_PHONE, text="status")
+    texts = env.wa_text_to(PLUMBER_PHONE)
+    assert any("Your Account" in t for t in texts) and any("first name" in t for t in texts)
+
+
+def test_nameless_plumber_is_not_nagged_forever(env):
+    p = env.add_plumber(name="Unnamed")
+    for _ in range(5):
+        env.post_wa(PLUMBER_PHONE, text="ok")
+    assert len([t for t in env.wa_text_to(PLUMBER_PHONE) if "first name" in t]) == main.MAX_NAME_ASKS
+    assert env.store.plumbers[p["id"]]["first_name"] == "Unnamed"
+
+
+def test_named_plumber_is_never_asked(env):
+    env.add_plumber()
+    env.post_wa(PLUMBER_PHONE, text="hello")
+    assert env.wa_text_to(PLUMBER_PHONE) == []
