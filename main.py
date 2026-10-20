@@ -25,6 +25,7 @@ VERIFY_TOKEN            = os.environ.get("VERIFY_TOKEN", "plumberflow_verify_123
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 ADMIN_PHONE             = os.environ.get("ADMIN_PHONE", "")     # your WhatsApp number (no +)
 ANTHROPIC_API_KEY       = os.environ.get("ANTHROPIC_API_KEY")   # for the Haiku 4.5 NLU layer
+TRIAL_LEADS             = int(os.environ.get("TRIAL_LEADS", "5"))  # free jobs given when you /approve a new plumber
 
 logger = logging.getLogger("plumberflow")
 logging.basicConfig(level=logging.INFO)
@@ -393,14 +394,20 @@ async def handle_founder_command(update: dict):
             await notify_founder(f"{plumber.get('first_name') or 'That plumber'} is not waiting for approval.")
             return
         await db(S.store.clear_hold, plumber["id"], HOLD_PENDING)
+        # A plumber who has never had trial leads gets them now. Anyone who already has a
+        # number (including 0, "used them all") keeps it.
+        trial = await db(S.store.grant_trial_leads, plumber["id"], TRIAL_LEADS)
         phone = normalize_phone(plumber.get("whatsapp"))
         name = plumber.get("first_name") or "there"
         sent = True
+        trial_line = (f"You have {trial} trial {'lead' if trial == 1 else 'leads'}: jobs from those carry no fee.\n\n"
+                      if trial > 0 else "")
         try:
             await send(phone, (
                 f"✅ You're approved, {name}.\n\n"
                 "You'll now be offered jobs in your areas. When one comes in, reply *take* to claim it. "
                 "The first plumber to reply gets the job.\n\n"
+                + trial_line +
                 "When a job is finished, send *done*. If it fell through, send *no go*. "
                 "Type *HELP* any time to see all commands."
             ))
@@ -409,6 +416,7 @@ async def handle_founder_command(update: dict):
             sent = False
         await notify_founder(
             f"Approved {name} ({str(plumber['id'])[:8]})."
+            + (f" {trial} trial {'lead' if trial == 1 else 'leads'}." if trial > 0 else " No trial leads.")
             + ("" if sent else " Could not WhatsApp them. Tell them yourself."))
 
     else:
@@ -951,7 +959,9 @@ async def try_plumber_command(sender: str, text_upper: str, plumber: dict) -> bo
             f"👷 *Your Account*\n\n"
             f"Name: {plumber.get('first_name') or '—'}\n"
             f"Status: {status}\n"
-            f"Open jobs: {open_jobs}\n\n"
+            f"Open jobs: {open_jobs}\n"
+            + (f"Trial leads left: {plumber['trial_stage']} (no fee)\n" if (plumber.get("trial_stage") or 0) > 0 else "")
+            + "\n"
             f"📍 Areas: {areas}\n"
             f"🛠 Services: {services}\n\n"
             "Type *HELP* for all commands."
