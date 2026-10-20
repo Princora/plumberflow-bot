@@ -701,3 +701,92 @@ def test_if_the_plumber_cannot_be_saved_the_founder_is_told(env, monkeypatch):
     monkeypatch.setattr(env.store, "insert_plumber", refuse)
     join(env)
     assert "NOT SAVED" in founder_text(env, "NOT SAVED")[-1]
+
+
+# ───────────────────────── onboarding: experience and PIRB in plain words ─────────────────────────
+
+def say(env, phone, *texts):
+    for text in texts:
+        env.post_wa(phone, text=text)
+
+
+def stage(phone):
+    return main.plumber_onboarding[phone]["stage"]
+
+
+def summary(env, phone):
+    return next(t for t in reversed(env.wa_text_to(phone)) if "Please confirm your details" in t)
+
+
+@pytest.mark.parametrize("answer", ["5 years", "5 yrs", "five years", "5", "10+ years"])
+def test_years_in_plain_words_are_accepted_and_pirb_is_asked_next(env, answer):
+    say(env, NEW_PLUMBER, "join", "Lerato", answer)
+    assert stage(NEW_PLUMBER) == "ob_pirb"
+    assert "Are you PIRB registered?" in env.wa_text_to(NEW_PLUMBER)[-1]
+    say(env, NEW_PLUMBER, "no")
+    assert stage(NEW_PLUMBER) == "ob_services"
+    state = main.plumber_onboarding[NEW_PLUMBER]
+    assert state["pirb_registered"] is False and state["pirb_number"] is None
+    assert state["years_experience"] == {"5 years": 5, "5 yrs": 5, "five years": 5, "5": 5, "10+ years": 10}[answer]
+
+
+def test_years_and_pirb_in_one_message_skip_the_follow_up(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "five years, PIRB 12345")
+    assert stage(NEW_PLUMBER) == "ob_services"
+    state = main.plumber_onboarding[NEW_PLUMBER]
+    assert (state["years_experience"], state["pirb_registered"], state["pirb_number"]) == (5, True, "PIRB 12345")
+
+
+def test_the_old_format_still_works(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "3, No PIRB")
+    state = main.plumber_onboarding[NEW_PLUMBER]
+    assert stage(NEW_PLUMBER) == "ob_services"
+    assert (state["years_experience"], state["pirb_registered"]) == (3, False)
+
+
+def test_an_answer_with_no_years_is_asked_again_with_an_example(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "lots")
+    assert stage(NEW_PLUMBER) == "ob_experience"
+    assert "I didn't catch the years" in env.wa_text_to(NEW_PLUMBER)[-1]
+    say(env, NEW_PLUMBER, "8 years")
+    assert stage(NEW_PLUMBER) == "ob_pirb"
+
+
+def test_an_unreadable_pirb_answer_is_asked_again(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "5 years", "hmm")
+    assert stage(NEW_PLUMBER) == "ob_pirb"
+    assert "Sorry, I didn't catch that" in env.wa_text_to(NEW_PLUMBER)[-1]
+    say(env, NEW_PLUMBER, "PIRB 4411")
+    state = main.plumber_onboarding[NEW_PLUMBER]
+    assert stage(NEW_PLUMBER) == "ob_services" and state["pirb_number"] == "PIRB 4411"
+
+
+def test_not_saying_anything_about_pirb_is_no_longer_read_as_not_registered(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "5 years")
+    assert "pirb_registered" not in main.plumber_onboarding[NEW_PLUMBER]    # asked, not assumed
+
+
+def test_registered_without_a_number_is_shown_honestly(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "5, yes", "1, 2", "Randburg", "1")
+    assert "Says registered, no number given" in summary(env, NEW_PLUMBER)
+    assert "None" not in summary(env, NEW_PLUMBER)
+    say(env, NEW_PLUMBER, "YES")
+    alert = [t for t in env.tg_texts() if "WAITING FOR APPROVAL" in t][-1]
+    assert "PIRB: Says registered, no number given" in alert
+    assert env.store.find_plumber_by_whatsapp(NEW_PLUMBER)["pirb_registered"] is True
+
+
+def test_the_summary_shows_what_was_read_so_a_misread_can_be_declined(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "twelve years, PIRB 99812", "1, 2", "Randburg", "1")
+    text = summary(env, NEW_PLUMBER)
+    assert "12 years" in text and "PIRB 99812" in text
+    say(env, NEW_PLUMBER, "NO")
+    assert env.store.find_plumber_by_whatsapp(NEW_PLUMBER) is None
+
+
+def test_a_full_signup_with_plain_answers_saves_and_holds_the_plumber(env):
+    say(env, NEW_PLUMBER, "join", "Lerato", "7 years", "no", "1, 2", "Rivonia Ext 3, Sandton", "1", "YES")
+    saved = env.store.find_plumber_by_whatsapp(NEW_PLUMBER)
+    assert (saved["experience_years"], saved["pirb_registered"]) == (7, False)
+    assert saved["areas"] == ["rivonia", "sandton"]
+    assert env.store.get_holds(saved["id"]) == {"pending_approval"}
