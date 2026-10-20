@@ -6,6 +6,7 @@ TELEGRAM_CHAT_ID) are still read, so secrets already set on Fly keep working.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
@@ -13,7 +14,10 @@ from app_store import AppStore
 from dispatch import DispatchService
 from dispatch.telegram import TelegramClient
 from dispatch.whatsapp import CloudMessenger, WhatsAppCloud
+from config_check import require_valid_environment
 from verification import VerificationService
+
+logger = logging.getLogger(__name__)
 
 
 def env(*names: str, default: str | None = None) -> str | None:
@@ -53,6 +57,10 @@ def _build_interpreter():
 
 
 def build_services() -> Services:
+    # Check every setting before touching anything, so one bad secret is reported by name
+    # (all of them at once) instead of a cryptic error from deep inside startup.
+    for warning in require_valid_environment(os.environ):
+        logger.warning(warning)
     store = AppStore(require("DATABASE_URL"))
     wa = WhatsAppCloud(require("WA_TOKEN", "WHATSAPP_TOKEN"),
                        require("WA_PHONE_NUMBER_ID", "PHONE_NUMBER_ID"))

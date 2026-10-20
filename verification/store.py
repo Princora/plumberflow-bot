@@ -39,6 +39,7 @@ class Store(Protocol):
     def list_active_plumbers(self) -> list[dict]: ...
     def use_trial_lead(self, plumber_id: str) -> int | None: ...
     def grant_trial_leads(self, plumber_id: str, n: int) -> int: ...
+    def ping(self) -> bool: ...
     # conversation state
     def get_plumber_state(self, plumber_id: str) -> dict | None: ...
     def set_plumber_state(
@@ -130,6 +131,9 @@ class InMemoryStore:
 
     def list_active_plumbers(self):
         return [copy.deepcopy(p) for p in self.plumbers.values() if p.get("active")]
+
+    def ping(self):
+        return True
 
     def use_trial_lead(self, plumber_id):
         p = self.plumbers.get(plumber_id)

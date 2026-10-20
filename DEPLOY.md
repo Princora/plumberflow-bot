@@ -111,14 +111,47 @@ remove them: `fly secrets unset SUPABASE_URL SUPABASE_KEY`.
 
 ### 5. Deploy
 
+Reduce to one machine first. Two would run every timer twice, and a stopped second machine can
+start itself when traffic arrives:
+
 ```bash
-fly deploy --ha=false
-fly scale count 1
+fly scale count 1 -a plumberflow
+fly deploy --ha=false -a plumberflow
 curl https://plumberflow.fly.dev/health
 ```
 
-Health should report `services: ready` and `scheduler: running`. Never run a second machine:
-both would run every timer.
+**A bad deploy cannot replace a working bot.** `fly.toml` uses a blue-green deploy with a health
+check on `/health`: Fly starts the new version beside the old one and only switches over once
+`/health` returns 200. `/health` is 200 only when the bot started, its scheduler is running and the
+database answers. Otherwise it returns 503 (`"status": "degraded"`), the deploy fails, and the
+version that was running keeps serving. Healthy looks like:
+
+```json
+{"status":"ok","service":"plumberflow","services":"ready","database":"ok","scheduler":"running","admin":"configured"}
+```
+
+**If the bot will not start, read the end of `fly logs`.** Before it touches anything it checks every
+secret and prints one report naming each wrong one, with no values:
+
+```
+PLUMBERFLOW CANNOT START. Fix these settings, then deploy again:
+
+  - DATABASE_URL looks like the whole psql command was pasted. ...
+  - FOUNDER_USER_ID must be digits only, your Telegram user id, ...
+```
+
+The mistakes that have actually happened: `DATABASE_URL` must be only the connection string
+(`postgresql://...`, the pooled one) and not the `psql '...'` command Neon also shows; and
+`FOUNDER_USER_ID` must be only digits. Put no `<` `>`, no quotes and no `--stage` inside a value.
+`--stage` goes after the values, outside any quotes, and saves the secrets without restarting the
+bot that is running:
+
+```bash
+fly secrets set -a plumberflow FOUNDER_USER_ID=123456789 DATABASE_URL='postgresql://...' --stage
+```
+
+To go back to a previous version without building anything:
+`fly releases -a plumberflow`, then `fly deploy -a plumberflow --image registry.fly.io/plumberflow:<image of that release>`.
 
 ### 6. Telegram webhook
 
