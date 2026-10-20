@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, Response
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
 from dispatch.suburbs import CANONICAL, DISPLAY_NAMES, display_name, resolve_suburb
-from intake import parse_urgency_text
+from intake import parse_job_type_text, parse_urgency_text
 from dispatch.telegram import handle_telegram_update
 from services import Services, build_services
 
@@ -175,20 +175,6 @@ def job_short_name(job_type: str) -> str:
 # ---------------------------------------------------------------------------
 # Quick keyword parsers for in-flow stage inputs (avoids an extra Haiku call)
 # ---------------------------------------------------------------------------
-def parse_job_type_text(text: str) -> str | None:
-    t = text.lower()
-    if any(w in t for w in ["burst", "flood", "pipe burst", "water everywhere"]):
-        return "Burst pipe"
-    if any(w in t for w in ["drain", "block", "clog", "toilet", "sewage", "backup"]):
-        return "Blocked drain"
-    if any(w in t for w in ["geyser", "hot water", "no hot", "heater", "boiler"]):
-        return "Geyser problem"
-    if any(w in t for w in ["leak", "drip", "dripping", "leaking", "seep"]):
-        return "Leak"
-    if any(w in t for w in ["other", "general", "misc"]):
-        return "Other"
-    return None
-
 _YES_WORDS = {"yes", "yebo", "ya", "yep", "yeah", "sorted", "done", "all good", "all sorted", "fixed"}
 _NO_WORDS  = {"no", "nope", "not yet", "nah"}
 _NEVER_CAME = ("never came", "didn't come", "did not come", "no show", "nobody came",
@@ -608,6 +594,35 @@ async def classify_urgency(text: str) -> str | None:
     result = await _haiku_json(URGENCY_SYSTEM_PROMPT, URGENCY_SCHEMA, text, 30)
     label = (result or {}).get("label")
     return label if label in URGENCY_TIERS else None
+
+
+JOB_TYPE_LABELS = ["Burst pipe", "Blocked drain", "Geyser problem", "Leak", "Other", "unclear"]
+
+JOB_TYPE_SCHEMA = {
+    "type": "object",
+    "properties": {"label": {"type": "string", "enum": JOB_TYPE_LABELS}},
+    "required": ["label"],
+    "additionalProperties": False,
+}
+
+JOB_TYPE_SYSTEM_PROMPT = """You read a WhatsApp reply from a homeowner in Johannesburg who was asked "What's the issue: burst pipe, blocked drain, geyser, leak, or something else?" about a plumbing problem.
+
+Labels:
+- Burst pipe: a pipe has burst or broken, or water is spraying or flooding out of a pipe.
+- Blocked drain: a drain, toilet, sink, bath or shower is blocked, slow or overflowing, or there is sewage or a smell coming back up.
+- Geyser problem: no hot water, or the geyser itself is leaking, bursting, tripping, noisy or not heating. If the geyser is the thing that is broken, use this even if the word burst or leak is also used.
+- Leak: a dripping tap, a leaking pipe, toilet cistern or connection, damp walls, or water coming through a ceiling or wall that is not clearly a burst pipe.
+- Other: a plumbing job that is none of these, such as a renovation, a new installation, a tap or toilet replacement.
+- unclear: it is not a plumbing problem, or there is not enough to tell.
+
+Pay attention to negation: "the drain isn't blocked, the tap is dripping" is a Leak. If the message describes two problems, choose the one that sounds most urgent. Return ONLY valid JSON matching the schema."""
+
+
+async def classify_job_type(text: str) -> str | None:
+    """One of the five job types, or None if the model is unavailable or cannot tell."""
+    result = await _haiku_json(JOB_TYPE_SYSTEM_PROMPT, JOB_TYPE_SCHEMA, text, 30)
+    label = (result or {}).get("label")
+    return label if label in JOB_TYPES.values() else None
 
 
 async def resolve_suburb_text(text: str) -> str | None:
@@ -1111,9 +1126,7 @@ async def continue_customer_flow(sender: str, text: str):
         # Accept numeric shortcut (1-5) or free text
         job = JOB_TYPES.get(text_number) or parse_job_type_text(text)
         if not job:
-            # Last resort: ask Haiku
-            nlu = await classify_message(text)
-            job = nlu.get("job_type") if nlu else None
+            job = await classify_job_type(text)
         if not job:
             await send(sender, (
                 "I didn't catch that. What's the issue — burst pipe, blocked drain, "

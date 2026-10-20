@@ -54,3 +54,46 @@ def parse_urgency_text(text: str) -> str | None:
         if pattern.search(rest):
             matched.add(label)
     return matched.pop() if len(matched) == 1 else None
+
+
+# ───────────────────────── What is the problem? ─────────────────────────
+#
+# Same rule as urgency: answer only when the message is short and names exactly one
+# kind of problem, with no negation in front of it. "toilet" alone is not enough
+# (leaking, running, blocked and overflowing toilets are different jobs), and
+# "flood" alone is not enough (rain floods; so do blocked drains). Everything
+# else goes to the model, which reads the whole message.
+
+BURST = "Burst pipe"
+BLOCKED = "Blocked drain"
+GEYSER = "Geyser problem"
+LEAK = "Leak"
+OTHER = "Other"
+
+_JOB_TYPES = {
+    BURST: re.compile(r"\bburst\b", re.I),
+    BLOCKED: re.compile(
+        r"\b(?:blocked|blockage|blockages|clogged|drains?|sewage|(?:backing|backed) up)\b", re.I),
+    GEYSER: re.compile(r"\b(?:no hot water|no hot|hot water|geysers?|heater|boiler)\b", re.I),
+    LEAK: re.compile(r"\b(?:leaks?|leaking|leaked|drips?|dripping|seeping|seeps?)\b", re.I),
+    OTHER: re.compile(r"\b(?:other|general|something else|misc)\b", re.I),
+}
+
+# A negator within three words before the problem word: "isn't blocked", "not a geyser problem".
+_NEGATOR_BEFORE = re.compile(
+    r"\b(?:not|no|isn['’]?t|aren['’]?t|wasn['’]?t|without|never|nothing)\b(?:\s+\w+){0,2}\s*$", re.I)
+
+
+def parse_job_type_text(text: str) -> str | None:
+    """One of the five job types, or None when the model should decide."""
+    if len(text.split()) > MAX_WORDS:
+        return None
+
+    matched: set[str] = set()
+    for label, pattern in _JOB_TYPES.items():
+        for m in pattern.finditer(text):
+            # "no hot water" is the symptom itself, not a negation of hot water.
+            if not m.group(0).lower().startswith("no hot") and _NEGATOR_BEFORE.search(text[:m.start()]):
+                return None
+            matched.add(label)
+    return matched.pop() if len(matched) == 1 else None

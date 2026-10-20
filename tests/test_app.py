@@ -387,7 +387,7 @@ class FakeAnthropic:
     async def create(self, **kw):
         system = kw["system"][0]["text"]
         user = kw["messages"][0]["content"]
-        self.calls.append((system[:40], user))
+        self.calls.append((system[:140], user))
         for phrase, reply in self.answers.items():
             if phrase in system:
                 body = reply(user) if callable(reply) else reply
@@ -517,3 +517,56 @@ def test_the_model_saying_unclear_asks_again(env, monkeypatch):
     for text in ("plumber", "burst pipe", "hmm not sure"):
         env.post_wa(CUSTOMER, text=text)
     assert main.conversations[CUSTOMER]["stage"] == "urgency"
+
+
+# ───────────────────────── job type ─────────────────────────
+
+
+def start_lead(env, problem, suburb="Randburg"):
+    for text in ("plumber", problem, "now", suburb, "skip"):
+        env.post_wa(CUSTOMER, text=text)
+
+
+def job_type_calls(fake):
+    return [u for s, u in fake.calls if "What's the issue" in s]
+
+
+def test_a_clear_problem_needs_no_model(env, monkeypatch):
+    env.add_plumber()
+    fake = FakeAnthropic(NLU_ANSWER)
+    monkeypatch.setattr(main, "anthropic_client", fake)
+    start_lead(env, "my toilet is leaking")
+    assert lead(env)["keyword"] == "leak"                   # was filed as a blocked drain
+    assert job_type_calls(fake) == []
+
+
+def test_numbers_still_work(env):
+    env.add_plumber()
+    start_lead(env, "3")
+    assert lead(env)["keyword"] == "geyser problem"
+
+
+def test_a_negated_or_mixed_problem_is_read_by_the_model(env, monkeypatch):
+    env.add_plumber()
+    fake = FakeAnthropic({**NLU_ANSWER, "What's the issue": {"label": "Leak"}})
+    monkeypatch.setattr(main, "anthropic_client", fake)
+    start_lead(env, "not a geyser problem, it's the tap")
+    assert lead(env)["keyword"] == "leak"                   # the old reader filed this as a geyser
+    assert job_type_calls(fake) == ["not a geyser problem, it's the tap"]
+
+
+def test_with_no_model_an_unreadable_problem_is_asked_again(env):
+    for text in ("plumber", "the geyser is leaking"):
+        env.post_wa(CUSTOMER, text=text)
+    assert main.conversations[CUSTOMER]["stage"] == "job_type"
+    assert "I didn't catch that" in env.wa_text_to(CUSTOMER)[-1]
+
+
+@pytest.mark.parametrize("answer", [{"label": "unclear"}, {"label": "Plumbing"}, {"label": None}])
+def test_an_unclear_or_invented_model_answer_asks_again(env, monkeypatch, answer):
+    monkeypatch.setattr(main, "anthropic_client",
+                        FakeAnthropic({**NLU_ANSWER, "What's the issue": answer}))
+    for text in ("plumber", "hmm it's complicated"):
+        env.post_wa(CUSTOMER, text=text)
+    assert main.conversations[CUSTOMER]["stage"] == "job_type"
+    assert "I didn't catch that" in env.wa_text_to(CUSTOMER)[-1]
