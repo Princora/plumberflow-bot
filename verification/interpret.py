@@ -19,7 +19,7 @@ from .parsing import MAX_JOB_VALUE_CENTS, MIN_JOB_VALUE_CENTS
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-5-5"
 
 AGREEMENT_LABELS = ("agrees", "disputes", "unclear")
 
@@ -81,6 +81,7 @@ class ClaudeReplyInterpreter:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=max_tokens,
+                thinking={"type": "disabled"},   # a short classification: no tokens spent thinking
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user}],
                 output_config={"format": {"type": "json_schema", "schema": schema}},
