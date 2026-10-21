@@ -26,6 +26,11 @@ from services import Services, build_services
 # ---------------------------------------------------------------------------
 VERIFY_TOKEN            = os.environ.get("VERIFY_TOKEN", "plumberflow_verify_123")
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+# Haiku 5.5 thinks by default and thinking counts against max_tokens. These calls are short
+# classifications (20 to 400 tokens), so thinking is off: the answer is the whole response.
+HAIKU_MODEL = "claude-haiku-5-5"
+NO_THINKING = {"type": "disabled"}
+
 ADMIN_PHONE             = os.environ.get("ADMIN_PHONE", "")     # your WhatsApp number (no +)
 # Meta's app secret. With it, every WhatsApp webhook call must carry Meta's signature, so nobody
 # can pretend to be a phone number (yours included). Without it, WhatsApp admin commands are off.
@@ -47,7 +52,7 @@ if ANTHROPIC_API_KEY:
     try:
         from anthropic import AsyncAnthropic
         anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-        logger.info("Anthropic NLU layer enabled (claude-haiku-4-5)")
+        logger.info(f"Anthropic NLU layer enabled ({HAIKU_MODEL})")
     except Exception as e:
         logger.warning(f"Anthropic init failed: {e}")
 
@@ -619,7 +624,8 @@ async def classify_message(text: str) -> dict | None:
         return None
     try:
         response = await anthropic_client.messages.create(
-            model="claude-haiku-4-5",
+            model=HAIKU_MODEL,
+            thinking=NO_THINKING,
             max_tokens=400,
             system=[{
                 "type": "text",
@@ -674,7 +680,8 @@ async def classify_job_reply(text: str) -> tuple[str, int | None] | None:
         return None
     try:
         response = await anthropic_client.messages.create(
-            model="claude-haiku-4-5",
+            model=HAIKU_MODEL,
+            thinking=NO_THINKING,
             max_tokens=100,
             system=[{
                 "type": "text",
@@ -734,7 +741,8 @@ async def _haiku_json(system: str, schema: dict, text: str, max_tokens: int) -> 
         return None
     try:
         response = await anthropic_client.messages.create(
-            model="claude-haiku-4-5",
+            model=HAIKU_MODEL,
+            thinking=NO_THINKING,
             max_tokens=max_tokens,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": text}],

@@ -1072,3 +1072,40 @@ def test_telegram_commands_ignore_everyone_but_the_founder(env):
     env.post_tg({"message": {"from": {"id": FOUNDER + 7}, "chat": {"id": 1}, "text": "/pending"}})
     env.post_tg({"callback_query": {"id": "x", "from": {"id": FOUNDER + 7}, "data": "s:L-0001"}})
     assert env.tg_texts() == []
+
+
+# ───────────────────────── the Haiku calls ─────────────────────────
+
+class _FakeMessages:
+    def __init__(self):
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        block = type("B", (), {"type": "text", "text": '{"label": "yes"}'})()
+        return type("R", (), {"content": [block]})()
+
+
+def test_haiku_calls_use_haiku_5_5_with_thinking_off(monkeypatch):
+    import asyncio
+    fake = _FakeMessages()
+    monkeypatch.setattr(main, "anthropic_client", type("C", (), {"messages": fake})())
+    asyncio.run(main._haiku_json("system", {"type": "object"}, "text", 30))
+    [call] = fake.calls
+    assert call["model"] == "claude-haiku-5-5" and call["thinking"] == {"type": "disabled"}
+    assert call["max_tokens"] == 30 and "temperature" not in call
+
+
+def test_reply_interpreter_uses_haiku_5_5_with_thinking_off():
+    from verification.interpret import ClaudeReplyInterpreter
+    calls = []
+
+    class Sync:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                calls.append(kwargs)
+                return type("R", (), {"content": [type("B", (), {"type": "text", "text": '{"label": "yes"}'})()]})()
+
+    ClaudeReplyInterpreter(Sync()).agreement("yes", "Is that right?")
+    assert calls[0]["model"] == "claude-haiku-5-5" and calls[0]["thinking"] == {"type": "disabled"}
