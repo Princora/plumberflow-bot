@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from config_check import ConfigError
+from verification.templates import Templated
 from credits import CREDIT_PRICE_CENTS, PACK_SIZES, local_number, pack_line, pack_price_cents, parse_pack, rand as credit_rand
 from dispatch.phone import normalize_phone
 from dispatch.router import handle_whatsapp_webhook
@@ -221,9 +222,10 @@ def quick_job_reply_label(text: str) -> str | None:
 # WhatsApp / Telegram senders
 # ---------------------------------------------------------------------------
 async def send(to: str, message: str):
-    """Free-text reply to someone who has just messaged us (inside Meta's 24-hour window)."""
+    """A reply to someone. Free text, and for a message that names an approved template, that
+    template when the 24-hour window has closed (see CloudMessenger.send_text)."""
     try:
-        await db(S.wa.send_text, to, message)
+        await db(S.messenger.send_text, to, message)
     except Exception as e:
         logger.error(f"WhatsApp send to {to} failed: {e}")
 
@@ -443,14 +445,16 @@ async def handle_founder_command(update: dict):
         trial_line = (f"You have {trial} trial {'lead' if trial == 1 else 'leads'}: jobs from those carry no fee.\n\n"
                       if trial > 0 else "")
         try:
-            await send(phone, (
+            template_line = (f"You have {trial} free trial {'lead' if trial == 1 else 'leads'}, no fee on those."
+                             if trial > 0 else "Each lead uses one credit. Reply BUY to get credits.")
+            await send(phone, Templated(
                 f"✅ You're approved, {name}.\n\n"
                 "You'll now be offered jobs in your areas. When one comes in, reply *take* to claim it. "
                 "The first plumber to reply gets the job.\n\n"
                 + trial_line +
                 "When a job is finished, send *done*. If it fell through, send *no go*. "
-                "Type *HELP* any time to see all commands."
-            ))
+                "Type *HELP* any time to see all commands.",
+                "pf_approved", [name, template_line]))
         except Exception:
             logger.exception("approval message failed")
             sent = False
@@ -490,10 +494,11 @@ async def handle_founder_command(update: dict):
         name = plumber.get("first_name") or "that plumber"
         sent = True
         try:
-            await send(normalize_phone(plumber.get("whatsapp")), (
+            await send(normalize_phone(plumber.get("whatsapp")), Templated(
                 f"✅ Payment received. {settled['added']} credits added.\n\n"
                 f"You now have {settled['balance']} {'credit' if settled['balance'] == 1 else 'credits'}. "
-                "Each lead you take uses one."))
+                "Each lead you take uses one.",
+                "pf_credits_added", [name, settled["added"], settled["balance"]]))
         except Exception:
             logger.exception("credit confirmation message failed")
             sent = False
@@ -509,8 +514,9 @@ async def handle_founder_command(update: dict):
         balance = await db(S.store.add_credits, plumber["id"], n)
         name = plumber.get("first_name") or "That plumber"
         try:
-            await send(normalize_phone(plumber.get("whatsapp")),
-                       f"✅ {n} credits added to your account. You now have {balance}.")
+            await send(normalize_phone(plumber.get("whatsapp")), Templated(
+                f"✅ {n} credits added to your account. You now have {balance}.",
+                "pf_credits_added", [plumber.get("first_name") or "there", n, balance]))
         except Exception:
             logger.exception("grant message failed")
         await notify_founder(f"Gave {name} {n} credits. Balance {balance}.")

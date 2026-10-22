@@ -15,27 +15,48 @@ def rand(cents: int) -> str:
     return f"R{cents // 100:,}"
 
 
+class Templated(str):
+    """A message that reads as plain text and also knows its approved WhatsApp template.
+
+    Everything that treats it as a string (tests, logging, the free-text send) is unchanged. When
+    Meta refuses free text because the 24-hour window has closed, CloudMessenger sends the named
+    template with these parameters instead. See WHATSAPP_TEMPLATES.md for each template's wording.
+    """
+
+    template: str
+    params: list[str]
+
+    def __new__(cls, text: str, template: str, params: list) -> "Templated":
+        obj = super().__new__(cls, text)
+        obj.template = template
+        obj.params = [str(p) for p in params]
+        return obj
+
+
 def _plural(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
 
 # ───────────────────────── Plumber side ─────────────────────────
 
-def lead_arrival(suburb: str, job_short: str, n_viewing: int, fee_cents: int, credits_left: int | None = None) -> str:
-    """A1. Photo is attached by the caller.
-    fee_cents 0 is a trial lead. Otherwise, with credits_left given, the lead costs one credit."""
+def cost_line(fee_cents: int, credits_left: int | None = None) -> str:
+    """What a lead costs this plumber. fee_cents 0 is a trial lead; otherwise, with credits_left
+    given, the lead costs one credit."""
     if fee_cents == 0:
-        cost = "Trial lead · no fee"
-    elif credits_left is None:
-        cost = f"{rand(fee_cents)} due after the job is done"
-    elif credits_left > 0:
-        cost = f"Uses 1 credit · you have {credits_left}"
-    else:
-        cost = "Uses 1 credit · you have none, reply BUY to top up"
+        return "Trial lead · no fee"
+    if credits_left is None:
+        return f"{rand(fee_cents)} due after the job is done"
+    if credits_left > 0:
+        return f"Uses 1 credit · you have {credits_left}"
+    return "Uses 1 credit · you have none, reply BUY to top up"
+
+
+def lead_arrival(suburb: str, job_short: str, n_viewing: int, fee_cents: int, credits_left: int | None = None) -> str:
+    """A1. Photo is attached by the caller."""
     return (
         f"New job — {suburb}\n"
         f"{job_short}\n\n"
-        f"{_plural(n_viewing, 'plumber', 'plumbers')} viewing\n{cost}"
+        f"{_plural(n_viewing, 'plumber', 'plumbers')} viewing\n{cost_line(fee_cents, credits_left)}"
     )
 
 
@@ -51,11 +72,11 @@ def take_confirmed(customer_name: str, customer_phone: str, address: str) -> str
 
 
 def a3_job_close_prompt(first_name: str, suburb: str, keyword: str) -> str:
-    return (
+    return Templated(
         f"{first_name} — {suburb} {keyword} still open on my side.\n\n"
         'Done? Send "done" and what you charged.\n\n'
-        'If it fell through, send "no go" — nothing owed.'
-    )
+        'If it fell through, send "no go" — nothing owed.',
+        "pf_job_close_prompt", [first_name, suburb, keyword])
 
 
 def a4_ask_value() -> str:
@@ -84,9 +105,11 @@ def out_of_credits() -> str:
     return "You're out of credits, so I can't give you this one yet. Reply BUY to top up, then reply take again."
 
 
-def credit_returned(job_short: str, balance: int) -> str:
-    return (f"The {job_short} job didn't go ahead, so your credit is back. "
-            f"You have {_plural(balance, 'credit', 'credits')}.")
+def credit_returned(job_short: str, balance: int, first_name: str = "there") -> str:
+    return Templated(
+        f"The {job_short} job didn't go ahead, so your credit is back. "
+        f"You have {_plural(balance, 'credit', 'credits')}.",
+        "pf_credit_returned", [first_name, job_short, balance])
 
 
 def a5_value_logged(job_value_cents: int, fee_cents: int) -> str:
@@ -112,12 +135,14 @@ def a6_reason_ack() -> str:
 def a7_customer_confirmed(
     first_name: str, customer_name: str, keyword: str, job_date: str, fee_cents: int
 ) -> str:
-    return (
+    owed = ("Nothing owed, no fee on this one." if fee_cents == 0
+            else f"{rand(fee_cents)} on this week's invoice.")
+    return Templated(
         f"{first_name} — {customer_name} confirmed the {keyword} was sorted on {job_date}.\n\n"
         + ("Nothing owed, no fee on this one.\n\nIf that's wrong, tell me now."
            if fee_cents == 0 else
-           f"{rand(fee_cents)} on this week's invoice.\n\nIf that's wrong, tell me now and I'll pull it.")
-    )
+           f"{rand(fee_cents)} on this week's invoice.\n\nIf that's wrong, tell me now and I'll pull it."),
+        "pf_customer_confirmed", [first_name, customer_name, keyword, job_date, owed])
 
 
 def a7_clarify() -> str:
@@ -131,12 +156,13 @@ def a7_pulled() -> str:
 def a9_pattern(first_name: str, jobs: list[tuple[int, str, str]]) -> str:
     """jobs: [(n, short, date)]."""
     lines = "\n".join(f"{n}. {short} · {date}" for n, short, date in jobs)
-    return (
+    return Templated(
         f"{first_name} — {len(jobs)} jobs open on my side with no update:\n\n"
         f"{lines}\n\n"
         "Done, or no go? Reply like this: 1 done R2400, 2 no go\n\n"
-        "Leads pause until these are closed off."
-    )
+        "Leads pause until these are closed off.",
+        "pf_open_jobs_pattern",
+        [first_name, len(jobs), " | ".join(f"{n}. {short} · {date}" for n, short, date in jobs)])
 
 
 def a9_progress(n_logged: int, n_still_open: int) -> str:
@@ -210,17 +236,18 @@ def credit_transition(
 # ───────────────────────── Customer side ─────────────────────────
 
 def b1_confirm_logged(first_name: str, plumber_first: str, keyword: str, value_cents: int) -> str:
-    return (
+    return Templated(
         f"{first_name} — {plumber_first} logged the {keyword} job at {rand(value_cents)}.\n\n"
-        "Sound right?"
-    )
+        "Sound right?",
+        "pf_confirm_logged", [first_name, plumber_first, keyword, rand(value_cents)])
 
 
 B1_BUTTONS = [("yes", "Yes"), ("off", "Something's off")]
 
 
 def b2_did_it_get_sorted(first_name: str, plumber_first: str, keyword: str) -> str:
-    return f"{first_name} — did {plumber_first} get the {keyword} sorted?\n\nOne word is fine."
+    return Templated(f"{first_name} — did {plumber_first} get the {keyword} sorted?\n\nOne word is fine.",
+                     "pf_did_it_get_sorted", [first_name, plumber_first, keyword])
 
 
 def b3_thanks(first_name: str) -> str:

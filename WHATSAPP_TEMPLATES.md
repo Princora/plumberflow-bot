@@ -33,7 +33,7 @@ the "out of credits" reply, every reply to a customer's answer, STATUS, and ever
 Weekly invoices, payment reminders and "leads paused" are no longer sent for new jobs (leads are
 paid with credits). They only apply if a full-fee job ever happens, so they are not drafted here.
 
-## Path A: one catch-all template (works with the code today, partly)
+## Path A: one catch-all template (the stopgap)
 
 `CloudMessenger` falls back to a single template with the whole message as `{{1}}` (line breaks
 become spaces) when Meta refuses free text. Set `WA_FALLBACK_TEMPLATE=plumber_message` once approved.
@@ -45,13 +45,10 @@ PlumberFlow message for you. {{1}} Reply here if you need to.
 Sample: `New job — Randburg. Burst pipe. 1 plumber viewing. Uses 1 credit, you have 4. Reply take to claim it. L-0412`
 
 Limits: Meta often rejects or reclassifies catch-all templates, and every message arrives as one
-unbroken paragraph. It does not cover the customer Yes / Something's off buttons, and it does not
-cover the approval, credits-added and `/grant` messages, which are sent through a different path
-that has no template fallback today. Treat it as a stopgap.
+unbroken paragraph. It does not cover the customer Yes / Something's off buttons. Treat it as a
+stopgap for any message that has no template of its own.
 
-## Path B: one template per message (recommended; needs a small code change)
-
-Each needs the code to send named parameters instead of the whole text.
+## Path B: one template per message (recommended; the code sends these)
 
 **pf_approved**
 ```
@@ -136,9 +133,8 @@ Quick check, {{1}}. {{2}} logged the {{3}} job at {{4}}. Sound right?
 ```
 Samples: `Thandi` · `Sipho` · `burst pipe` · `R2,400`
 
-Button payloads must be `<job id>|yes` and `<job id>|off`. A tap on a template button arrives as
-`type: "button"` with `button.payload`, not `interactive.button_reply`, and the dispatch router
-ignores that shape today. Both the sending and the receiving side need code.
+The bot attaches the button payloads itself (`<job id>|yes` and `<job id>|off`); you only create the
+two button labels in Meta.
 
 **pf_did_it_get_sorted** (customer)
 ```
@@ -148,9 +144,19 @@ One word is fine.
 ```
 Samples: `Thandi` · `Sipho` · `burst pipe`
 
-## Code still to do for Path B
+## How the code uses them
 
-1. Send the per-message templates (named parameters) when free text is refused.
-2. Add the same fallback to the messages sent from `main.send` (approval, credits added, `/grant`),
-   which are free text only today.
-3. Receive template button taps (`type: "button"`) in the dispatch router.
+Free text is always tried first. If Meta refuses it (the 24-hour window has closed), the message is
+sent as its own template above, with the values filled in. If that template is not approved yet, the
+catch-all `plumber_message` is used when `WA_FALLBACK_TEMPLATE` is set; otherwise the send fails and
+is logged, as before. So submitting templates one at a time is safe: each starts working as soon as
+Meta approves it, with no deploy.
+
+- Template language: `en` by default. If you create them as English (South Africa), set the Fly
+  secret `WA_TEMPLATE_LANG=en_ZA`.
+- The customer *Yes* / *Something's off* message goes as `pf_confirm_logged` with two quick-reply
+  buttons. When the customer taps one, the bot reads it like the normal button.
+- When you create `pf_confirm_logged`, add exactly two **Quick reply** buttons, in this order:
+  `Yes`, then `Something's off`. Do not add other buttons.
+- The messages sent when you run `/approve`, `/credit` and `/grant` use the same fallback.
+- A test checks that each template's number of values matches this file, so the two cannot drift.

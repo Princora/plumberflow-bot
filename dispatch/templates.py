@@ -7,8 +7,12 @@ from verification import templates as VT
 
 def offer_to_plumber(ref: str, suburb: str, job_short: str, n_viewing: int, fee_cents: int,
                      credits_left: int | None = None) -> str:
-    return (f"{VT.lead_arrival(suburb, job_short, n_viewing, fee_cents, credits_left)}"
-            f"\n\nReply take to claim it · {ref}")
+    return VT.Templated(
+        f"{VT.lead_arrival(suburb, job_short, n_viewing, fee_cents, credits_left)}"
+        f"\n\nReply take to claim it · {ref}",
+        "pf_job_offer",
+        [suburb, job_short, VT._plural(n_viewing, "plumber", "plumbers"),
+         VT.cost_line(fee_cents, credits_left), ref])
 
 
 def which_offer(options: list[tuple[str, str]]) -> str:
@@ -21,7 +25,7 @@ def gone(label: str) -> str:
 
 
 def lost_to_other(label: str) -> str:
-    return f"{label} has been taken by another plumber."
+    return VT.Templated(f"{label} has been taken by another plumber.", "pf_job_taken_elsewhere", [label])
 
 
 # ───── founder (Telegram) ─────
