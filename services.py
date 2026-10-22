@@ -66,7 +66,8 @@ def build_services() -> Services:
                        require("WA_PHONE_NUMBER_ID", "PHONE_NUMBER_ID"))
     tg = TelegramClient(require("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN"),
                         require("FOUNDER_CHAT_ID", "TELEGRAM_CHAT_ID"))
-    messenger = CloudMessenger(wa, tg, fallback_template=env("WA_FALLBACK_TEMPLATE"))
+    messenger = CloudMessenger(wa, tg, fallback_template=env("WA_FALLBACK_TEMPLATE"),
+                               template_lang=env("WA_TEMPLATE_LANG") or "en")
     ver = VerificationService(store, messenger, interpreter=_build_interpreter())
     disp = DispatchService(store, ver, messenger, tg)
     return Services(store, wa, tg, messenger, ver, disp, int(require("FOUNDER_USER_ID")))

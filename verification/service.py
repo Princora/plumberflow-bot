@@ -169,7 +169,7 @@ class VerificationService:
                              payload={"balance": balance})
         plumber = self.store.get_plumber(job["plumber_id"])
         if plumber and balance is not None:
-            self.msg.send_plumber(plumber, T.credit_returned(self._short(job), balance))
+            self.msg.send_plumber(plumber, T.credit_returned(self._short(job), balance, plumber["first_name"]))
         return job
 
     def _apply_trial_lead(self, job: dict) -> dict:
@@ -617,37 +617,45 @@ class VerificationService:
                 and now - j["accepted_at"] < timedelta(days=7))
         ]
         for job in candidates:
-            age = now - job["accepted_at"]
-            plumber = self._plumber(job)
-            name = job.get("customer_name") or "there"
+            try:
+                self._sweep_job(job, now)
+            except Exception:
+                # One message that cannot be delivered (a closed WhatsApp window with no approved
+                # template, say) must not stop the other jobs from being swept.
+                logger.exception("sweep_jobs: job %s skipped this round", job["id"])
 
-            if job["plumber_claim"] is None and job["status"] in OPEN_STATUSES:
-                if age >= A3_AFTER and not job["a3_sent_at"] and _in_window(now, PLUMBER_WINDOW):
-                    self.msg.send_plumber(plumber, T.a3_job_close_prompt(
-                        plumber["first_name"], job.get("suburb") or "", job.get("job_keyword") or "job"))
-                    job = self.store.update_job(job["id"], a3_sent_at=now)
+    def _sweep_job(self, job: dict, now: datetime) -> None:
+        age = now - job["accepted_at"]
+        plumber = self._plumber(job)
+        name = job.get("customer_name") or "there"
 
-            if job["plumber_claim"] in (None, "no_go") and job["status"] != "charged":
-                if age >= B2_AFTER and not job["b2_sent_at"] and _in_window(now, CUSTOMER_ASK_WINDOW):
-                    self.msg.send_customer(job["customer_phone"], T.b2_did_it_get_sorted(
-                        name, plumber["first_name"], job.get("job_keyword") or "job"))
-                    job = self.store.update_job(job["id"], b2_sent_at=now)
+        if job["plumber_claim"] is None and job["status"] in OPEN_STATUSES:
+            if age >= A3_AFTER and not job["a3_sent_at"] and _in_window(now, PLUMBER_WINDOW):
+                self.msg.send_plumber(plumber, T.a3_job_close_prompt(
+                    plumber["first_name"], job.get("suburb") or "", job.get("job_keyword") or "job"))
+                job = self.store.update_job(job["id"], a3_sent_at=now)
 
-            if (
-                job["plumber_claim"] == "done" and not job["b1_sent_at"]
-                and job["customer_response"] is None
-                and now - job["plumber_claim_at"] >= B1_AFTER
-                and _in_window(now, CUSTOMER_WINDOW)
-            ):
-                self.msg.send_customer_buttons(
-                    job["customer_phone"],
-                    T.b1_confirm_logged(name, plumber["first_name"],
-                                        job.get("job_keyword") or "job", job["job_value_cents"]),
-                    T.B1_BUTTONS, job["id"],
-                )
-                job = self.store.update_job(job["id"], b1_sent_at=now)
+        if job["plumber_claim"] in (None, "no_go") and job["status"] != "charged":
+            if age >= B2_AFTER and not job["b2_sent_at"] and _in_window(now, CUSTOMER_ASK_WINDOW):
+                self.msg.send_customer(job["customer_phone"], T.b2_did_it_get_sorted(
+                    name, plumber["first_name"], job.get("job_keyword") or "job"))
+                job = self.store.update_job(job["id"], b2_sent_at=now)
 
-            self._settle(job["id"])
+        if (
+            job["plumber_claim"] == "done" and not job["b1_sent_at"]
+            and job["customer_response"] is None
+            and now - job["plumber_claim_at"] >= B1_AFTER
+            and _in_window(now, CUSTOMER_WINDOW)
+        ):
+            self.msg.send_customer_buttons(
+                job["customer_phone"],
+                T.b1_confirm_logged(name, plumber["first_name"],
+                                    job.get("job_keyword") or "job", job["job_value_cents"]),
+                T.B1_BUTTONS, job["id"],
+            )
+            job = self.store.update_job(job["id"], b1_sent_at=now)
+
+        self._settle(job["id"])
 
     def sweep_patterns(self) -> None:
         by_plumber: dict[str, list[dict]] = {}

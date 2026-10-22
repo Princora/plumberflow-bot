@@ -837,3 +837,20 @@ def test_resolving_a_dispute_as_no_charge_returns_the_credit(env):
     store.update_job(job2["id"], status="disputed")
     svc.admin_resolve(job2["id"], "charge")
     assert store.credit_balance(job2["plumber_id"]) == 0
+
+
+def test_one_undeliverable_message_does_not_stop_the_sweep_for_other_jobs(env):
+    store, msg, clock, svc, sipho = env
+    thabo = store.add_plumber("Thabo")
+    accept(svc, sipho, n=1, phone="0821000001")
+    accept(svc, thabo, n=2, phone="0821000002")
+    original = msg.send_plumber
+
+    def flaky(plumber, text):
+        if plumber["first_name"] == "Sipho":
+            raise RuntimeError("131047 re-engagement message")
+        original(plumber, text)
+    msg.send_plumber = flaky
+    clock.set(MON + timedelta(days=1, minutes=30))
+    svc.sweep_jobs()
+    assert any(name == "Thabo" and "still open" in t for name, t in msg.plumber)
